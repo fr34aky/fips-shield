@@ -1,0 +1,38 @@
+# fips-shield core — stream-context plumbing shared by every profile:
+# the njs engine, the shared dict backing connection-rate limiting, the
+# per-node connection zone, and the session log format.
+#
+# Profiles (*.stream, rendered after this file by numeric prefix) only
+# declare their own server block and policy js_vars.
+
+js_path "/etc/nginx/njs/";
+js_import shield_core from shield_core.js;
+js_import shield_ws from shield_ws.js;
+
+# Set by the engine when it refuses or cuts a session; empty otherwise.
+js_var $shield_verdict '';
+
+# Connection-rate counters. The stream module has limit_conn but no
+# limit_req, so the rate limit lives in the engine and needs shared
+# state across workers. The zone timeout must exceed SHIELD_CONN_WINDOW
+# or counters would expire inside their own window.
+js_shared_dict_zone zone=shield_connrate:${SHIELD_CONNRATE_ZONE_SIZE} timeout=${SHIELD_CONNRATE_TIMEOUT} type=number evict;
+
+# On a FIPS mesh a source address is a /128 derived from the node's key:
+# no NAT aliasing, no spoofing. Per-address limits are per-node limits.
+limit_conn_zone $binary_remote_addr zone=shield_stream_conn:${SHIELD_CONN_ZONE_SIZE};
+
+# One line per session; "verdict" is non-empty when the engine refused
+# or closed it. Phase 3 consumes this alongside the per-verdict lines
+# the engine writes to the error log.
+log_format shield_stream_json escape=json
+    '{'
+    '"ts":"$time_iso8601",'
+    '"src":"$remote_addr",'
+    '"service":"$shield_service",'
+    '"status":$status,'
+    '"bytes_in":$bytes_received,'
+    '"bytes_out":$bytes_sent,'
+    '"duration":$session_time,'
+    '"verdict":"$shield_verdict"'
+    '}';

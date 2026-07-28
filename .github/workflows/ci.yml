@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        # SC2016 is excluded: the literal ${VAR} lists handed to
+        # envsubst, and the patterns that build them, must not expand.
+        run: |
+          shellcheck --exclude=SC2016 $(git ls-files '*.sh') \
+            core/actions/shield-ban guard/shield-ban
+      - name: rustfmt
+        run: cargo fmt --manifest-path guard/Cargo.toml --check
+      - name: clippy
+        run: |
+          cargo clippy --manifest-path guard/Cargo.toml \
+            --all-targets -- -D warnings
+
+  static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Renders every profile alone and all together, builds both
+      # images, and runs nginx -t plus fail2ban-client -t.
+      - run: test/validate.sh
+
+  behavioral:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: WebSocket message policy (strfry profile)
+        run: test/ws_smoke.sh
+      - name: detection -> enforcement loop
+        run: test/ban_smoke.sh
+      - name: generic TCP profile
+        run: test/tcp_smoke.sh
+
+  guard:
+    # Needs a privileged container and a kernel with BPF + BTF; the
+    # GitHub Ubuntu runners provide both.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install clang (builds the BPF object)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: eBPF guard (drops, expiry, throttle)
+        run: test/guard_smoke.sh

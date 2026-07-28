@@ -116,15 +116,36 @@ decrypted the traffic. It protects every service on the host but does
 not reduce decrypt cost or touch peering/routing — see "Where this
 sits" in README.md.
 
-## Phase 5 — Modularization proof, packaging, CI
+## Phase 5 — Modularization proof, packaging, CI ✅
 
-- Extract a profile template; prove the seams with a second profile
-  (generic TCP service via the stream stage only).
-- Integration test harness (Docker): attacker + relay nodes running
-  the full stack; assert floods get 429/closed, banned node's traffic
-  drops at the eBPF layer, a well-behaved node is unaffected.
-- CI: shellcheck, validate.sh, guard build + clippy, integration
-  suite. Release packaging (image publish, host-mode tarball).
+- Core/profile split completed: `core/njs/shield_core.js` (ban
+  enforcement, connection-rate limiting, verdict logging) and
+  `core/nginx/05-shield-core.stream` (engine loading, shared dict,
+  connection zone, session log format) are service-agnostic;
+  `shield_ws.js` became a profile module importing the core.
+- **New mechanism in the core**, proving that seam too: per-node
+  connection-rate limiting in a fixed window backed by an njs shared
+  dict — the stream module has `limit_conn` but no `limit_req`, so
+  non-HTTP services previously had no rate control. Emits the
+  `conn-rate` verdict, which the existing jails pick up unchanged.
+- **Second profile** (`profiles/tcp/`): any plain TCP service, one
+  30-line server block, no payload inspection — the modularity proof.
+- `SHIELD_PROFILES` (comma-separated) selects profiles in both deploy
+  modes: `render.sh` for host mode, a staging entrypoint for the
+  container. Comma rather than space because `docker --env-file` takes
+  quotes literally.
+- Detection jails made profile-agnostic (log globs), so a new profile
+  is covered by the existing jails with no edit.
+- `test/tcp_smoke.sh`: passthrough, concurrency cap, connection rate,
+  ban enforcement from the shared banlist, verdict lines, per-profile
+  session log. `test/validate.sh` now renders every profile alone and
+  all together, so profiles cannot silently depend on or collide with
+  each other.
+- `Makefile` (build/test/install targets) and GitHub Actions CI:
+  shellcheck + rustfmt + clippy, static validation, all three
+  behavioral suites, and the privileged eBPF guard suite.
+- `docs/writing-a-profile.md`: how to protect another service, and
+  where a new mechanism belongs.
 
 ## Future (out of scope, design toward)
 

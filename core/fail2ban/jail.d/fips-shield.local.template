@@ -17,7 +17,7 @@ ignoreself = ${SHIELD_F2B_IGNORESELF}
 [fips-shield-handshake]
 enabled = true
 filter = fips-shield-handshake
-logpath = /var/log/nginx/shield-strfry.access.log
+logpath = /var/log/nginx/shield-*.access.log
 maxretry = ${SHIELD_F2B_HANDSHAKE_MAXRETRY}
 
 [fips-shield-verdict]
@@ -29,5 +29,5 @@ maxretry = ${SHIELD_F2B_VERDICT_MAXRETRY}
 [fips-shield-scan]
 enabled = true
 filter = fips-shield-scan
-logpath = /var/log/nginx/shield-strfry.access.log
+logpath = /var/log/nginx/shield-*.access.log
 maxretry = ${SHIELD_F2B_SCAN_MAXRETRY}

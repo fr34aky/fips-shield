@@ -4,6 +4,7 @@
 #
 #   ./render.sh <shield.env> [output-dir] [njs-dir]
 #
+# Renders the shared core plus every profile named in SHIELD_PROFILES.
 # Output defaults to /etc/nginx/conf.d; the njs engine is copied to
 # njs-dir (default /etc/nginx/njs). Only ${SHIELD_*} placeholders are
 # substituted; nginx's own $variables are left alone.
@@ -23,18 +24,20 @@ ENV_FILE="${1:?usage: render.sh <shield.env> [output-dir] [njs-dir]}"
 OUT_DIR="${2:-/etc/nginx/conf.d}"
 NJS_DIR="${3:-/etc/nginx/njs}"
 
-TEMPLATES=(
-    "$REPO_ROOT"/core/nginx/*.template
-    "$REPO_ROOT"/profiles/strfry/*.template
-)
-
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 set +a
 
-# Every placeholder used by the templates must be set (empty is fine —
-# some knobs, like the kind deny list, are legitimately empty).
+TEMPLATES=("$REPO_ROOT"/core/nginx/*.template)
+for profile in $(echo "${SHIELD_PROFILES:-strfry}" | tr ',' ' '); do
+    dir="$REPO_ROOT/profiles/$profile"
+    [ -d "$dir" ] || { echo "error: no such profile: $profile" >&2; exit 1; }
+    TEMPLATES+=("$dir"/*.template)
+done
+
+# Every placeholder used by the selected templates must be set (empty
+# is fine — some knobs, like the kind deny list, are legitimately so).
 mapfile -t vars < <(grep -hoE '\$\{SHIELD_[A-Z0-9_]+\}' "${TEMPLATES[@]}" | tr -d '${}' | sort -u)
 missing=0
 for v in "${vars[@]}"; do
@@ -54,8 +57,8 @@ for t in "${TEMPLATES[@]}"; do
     echo "rendered $out"
 done
 
-cp "$REPO_ROOT"/core/njs/shield_ws.js "$NJS_DIR"/
-echo "installed $NJS_DIR/shield_ws.js"
+cp "$REPO_ROOT"/core/njs/*.js "$NJS_DIR"/
+echo "installed $NJS_DIR/{$(cd "$REPO_ROOT"/core/njs && echo *.js | tr ' ' ',')}"
 
 echo "Now run: nginx -t && systemctl reload nginx"
 echo "(nginx must load ngx_stream_js_module and include conf.d/*.stream" \

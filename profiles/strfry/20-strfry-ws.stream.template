@@ -1,31 +1,13 @@
 # fips-shield profile: strfry — stream stage (WebSocket inspection).
 #
-# Owns the fips0-facing listener since Phase 2. Client bytes run
-# through the njs engine (core/njs/shield_ws.js), which enforces the
-# Nostr message policy below before anything reaches the http stage;
-# the http stage (10-strfry.conf) now listens on loopback behind this,
-# receiving the real client address via the PROXY protocol.
+# Owns the fips0-facing listener. Client bytes run through the njs
+# engine (core/njs/shield_ws.js), which enforces the Nostr message
+# policy below before anything reaches the http stage; the http stage
+# (10-strfry.conf) listens on loopback behind this and receives the
+# real client address via the PROXY protocol.
 #
-# Included into the stream{} context (files matching *.stream).
-
-js_path "/etc/nginx/njs/";
-js_import shield from shield_ws.js;
-
-js_var $shield_verdict '';
-
-# One line per session; "verdict" is non-empty when the engine closed
-# the session (last rule that fired). Phase 3 consumes this alongside
-# the per-verdict lines the engine writes to the error log.
-log_format shield_stream_json escape=json
-    '{'
-    '"ts":"$time_iso8601",'
-    '"src":"$remote_addr",'
-    '"status":$status,'
-    '"bytes_in":$bytes_received,'
-    '"bytes_out":$bytes_sent,'
-    '"duration":$session_time,'
-    '"verdict":"$shield_verdict"'
-    '}';
+# Shared plumbing (js_import, log format, zones) is in
+# core/nginx/05-shield-core.stream.
 
 server {
     listen [${SHIELD_BIND_ADDR}]:${SHIELD_LISTEN_PORT};
@@ -41,7 +23,12 @@ server {
     # established sessions every SHIELD_BAN_RECHECK seconds.
     js_var $shield_ban_file '${SHIELD_BAN_FILE}';
     js_var $shield_ban_recheck ${SHIELD_BAN_RECHECK};
-    js_access shield.access;
+    # New connections per node per window (0 = off). The http stage's
+    # limit_req prices handshakes; this prices TCP connections, which
+    # cost something even when the handshake never completes.
+    js_var $shield_conn_rate ${SHIELD_STRFRY_CONN_RATE};
+    js_var $shield_conn_window ${SHIELD_CONN_WINDOW};
+    js_access shield_core.access;
 
     # Message policy (see shield.env for per-knob documentation).
     js_var $shield_ws_max_msg ${SHIELD_WS_MAX_MSG};
@@ -57,7 +44,7 @@ server {
     js_var $shield_nostr_types '${SHIELD_NOSTR_TYPES}';
     js_var $shield_nostr_kind_deny '${SHIELD_NOSTR_KIND_DENY}';
 
-    js_filter shield.filter;
+    js_filter shield_ws.filter;
 
     proxy_pass 127.0.0.1:${SHIELD_HTTP_PORT};
     proxy_protocol on;

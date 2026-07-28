@@ -1,11 +1,14 @@
 # fips-shield
 
-Layer-7 protection for services exposed over a [FIPS](https://github.com/)
-mesh. First target: Nostr relays (strfry) reachable via authenticated
-FIPS IPv6, defended against application-level abuse — connection floods,
-handshake churn, slow clients, and (in later phases) WebSocket message
-floods — with nginx as the enforcement proxy and eBPF as the kernel-level
-ban layer.
+Layer-7 protection for services exposed over a FIPS mesh — defended
+against application-level abuse the mesh's own crypto cannot see:
+connection floods, handshake churn, slow clients, and protocol-level
+floods inside established connections. nginx is the enforcement proxy,
+fail2ban the detection engine, and eBPF the kernel-level ban layer.
+
+Ships with two profiles: **strfry** (Nostr relays, with WebSocket
+message-aware filtering) and **tcp** (any plain TCP service). Adding
+another service is usually one template file.
 
 ## Threat model
 
@@ -56,7 +59,10 @@ Three modular seams keep it extensible beyond HTTP and beyond today's
 mechanisms:
 
 - **Profiles** (`profiles/<service>/`) — per-service nginx config +
-  rules + docs. Adding a service = adding a profile; the core is shared.
+  rules + docs. Adding a service is usually **one template file**;
+  everything else is inherited from the core. Two ship today: `strfry`
+  (Nostr over WebSocket, protocol-aware) and `tcp` (any plain TCP
+  service). See [docs/writing-a-profile.md](docs/writing-a-profile.md).
 - **Detection modules** — anything emitting a verdict in the frozen
   schema ([docs/verdict-schema.md](docs/verdict-schema.md)) into the
   log stream the engine consumes.
@@ -71,21 +77,25 @@ mechanisms:
 core/nginx/        nginx.conf (module loading, http+stream contexts) and
                    shared http-context config: log format, limit zones,
                    WebSocket plumbing (*.conf.template, envsubst)
-core/njs/          shield_ws.js — WebSocket/Nostr inspection engine +
-                   banlist enforcement (njs)
+core/njs/          shield_core.js — bans, connection-rate limiting,
+                   verdict logging (shared by every profile);
+                   shield_ws.js — WebSocket/Nostr inspection
 core/fail2ban/     jails, filters, banaction for the detection engine
 core/actions/      shield-ban — enforcement backend CLI (frozen contract)
 guard/             fips-guard — eBPF enforcement backend (Rust/aya + a
                    tc classifier in C), same CLI, kernel-level drops
-profiles/strfry/   strfry relay profile: http vhost + stream stage
-                   templates, operator notes
+profiles/strfry/   strfry relay: http vhost + stream stage, WS-aware
+profiles/tcp/      any plain TCP service: one stream server block
 deploy/container/  Dockerfiles (shield, fail2ban sidecar) + compose
 deploy/host/       render.sh, install-fail2ban.sh + README for running
                    directly on the fips node
 test/              validate.sh (static), ws_smoke.sh (WS policy),
-                   ban_smoke.sh (detection→enforcement loop)
+                   ban_smoke.sh (detection→enforcement loop),
+                   tcp_smoke.sh (generic profile), guard_smoke.sh (eBPF)
+Makefile           build / test / install targets (make help)
 docs/plan.md       full implementation plan and phase status
 docs/verdict-schema.md  frozen verdict schema + backend CLI contract
+docs/writing-a-profile.md  how to protect another service
 shield.env.example all tunables, documented
 ```
 
@@ -127,23 +137,31 @@ curl -6 -H 'Accept: application/nostr+json' "http://<npub>.fips/"   # NIP-11
 ## Tuning
 
 All knobs live in `shield.env` (see `shield.env.example` for the full
-annotated list): bind address/port, upstream, per-node handshake rate
-and connection cap, and the WebSocket message policy — message/EVENT/
-REQ token buckets, subscription and filter-complexity caps, message
-size, type allowlist, kind denylist. Connection-level violations
-return 429 and are marked in the JSON access log (`"limited"`);
-message-level violations close the WebSocket (NOTICE + 1008) and log a
-`shield-verdict` JSON line. Both streams are the detection-engine
-input in Phase 3.
+annotated list): which profiles to run, bind address/port, upstreams,
+per-node connection rate and concurrency caps, and — for the strfry
+profile — the WebSocket message policy (message/EVENT/REQ token
+buckets, subscription and filter-complexity caps, message size, type
+allowlist, kind denylist).
+
+Connection-level violations return 429 (HTTP) or refuse the connection
+(stream) and are marked in the JSON logs; message-level violations
+close the WebSocket with a NOTICE and a 1008 Close. Both write
+`shield-verdict` lines, which is what the detection engine consumes.
 
 ## Validation
 
 ```sh
-test/validate.sh     # static: render, build images, nginx -t, fail2ban -t
-test/ws_smoke.sh     # behavioral: WS clients vs. the message policy
-test/ban_smoke.sh    # behavioral: detection -> enforcement loop
-test/guard_smoke.sh  # behavioral: eBPF drops/throttle (privileged, Linux)
+make test            # everything below
+make validate        # static: render every profile, nginx -t, fail2ban -t
+make test-ws         # behavioral: WS clients vs. the message policy
+make test-ban        # behavioral: detection -> enforcement loop
+make test-tcp        # behavioral: generic TCP profile
+make test-guard      # behavioral: eBPF drops/throttle (privileged, Linux)
 ```
+
+CI runs all of them on every push
+([.github/workflows/ci.yml](.github/workflows/ci.yml)), plus
+shellcheck, rustfmt, and clippy.
 
 `ws_smoke.sh` runs a mock relay upstream plus raw-socket WebSocket
 clients inside the container's network namespace and asserts both
@@ -185,5 +203,6 @@ Phase 1 — HTTP-level hardening and per-node rate limiting. ✅
 Phase 2 — WebSocket message-aware filtering (njs stream stage). ✅
 Phase 3 — Detection & response: fail2ban → shield-ban → nginx. ✅
 Phase 4 — eBPF guard: kernel-level drops and per-source throttle. ✅
-See [docs/plan.md](docs/plan.md) for what's next: second profile,
-packaging + CI (5).
+Phase 5 — Modular profiles (second profile), Makefile, CI. ✅
+The roadmap in [docs/plan.md](docs/plan.md) is complete; see its
+"Future" section for what could come next.

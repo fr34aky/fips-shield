@@ -26,14 +26,16 @@
 // Policy knobs arrive via js_var (see the profile's .stream template);
 // unset knobs fall back to the defaults below.
 //
-// Ban enforcement (Phase 3): the detection engine maintains a banlist
-// file ("<ip> <until-epoch-seconds>" per line, atomically replaced —
-// see docs/verdict-schema.md). The access hook rejects banned sources
-// at connection accept; established sessions re-check every
-// shield_ban_recheck seconds and are cut with the usual Close
-// choreography. The file is re-read only when its mtime/size changes.
+// Ban enforcement, connection-rate limiting and verdict logging are
+// service-agnostic and live in shield_core.js, which every profile
+// shares; this module adds the protocol-aware layer plus the
+// mid-session ban re-check (established sessions are cut with the
+// usual Close choreography rather than left running).
 
-import fs from 'fs';
+import core from 'shield_core.js';
+
+var num = core.num;
+var keyset = core.keyset;
 
 var OP_CONT = 0x0;
 var OP_TEXT = 0x1;
@@ -42,73 +44,6 @@ var OP_CLOSE = 0x8;
 
 var MAX_HANDSHAKE = 16384;
 var DEFAULT_TYPES = 'EVENT,REQ,CLOSE,COUNT,AUTH,NEG-OPEN,NEG-MSG,NEG-CLOSE';
-
-function num(v, dflt) {
-    var n = parseFloat(v);
-    return isNaN(n) ? dflt : n;
-}
-
-function keyset(v, dflt) {
-    var raw = (v === undefined || v === '') ? dflt : v;
-    var out = {};
-    if (raw === '') {
-        return out;
-    }
-    var parts = raw.split(',');
-    for (var i = 0; i < parts.length; i++) {
-        var p = parts[i].trim();
-        if (p !== '') {
-            out[p] = true;
-        }
-    }
-    return out;
-}
-
-var banCache = { path: '', mtime: 0, size: -1, map: {} };
-
-function loadBans(path) {
-    var st;
-    try {
-        st = fs.statSync(path);
-    } catch (e) {
-        banCache.path = path;
-        banCache.mtime = 0;
-        banCache.size = -1;
-        banCache.map = {};
-        return banCache.map;
-    }
-    var mtime = st.mtimeMs !== undefined ? st.mtimeMs : Number(st.mtime);
-    if (banCache.path === path && banCache.mtime === mtime &&
-        banCache.size === st.size) {
-        return banCache.map;
-    }
-    var map = {};
-    try {
-        var lines = fs.readFileSync(path, 'utf8').split('\n');
-        for (var i = 0; i < lines.length; i++) {
-            var parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 2 && parts[0] !== '') {
-                map[parts[0]] = parseInt(parts[1], 10);
-            }
-        }
-    } catch (e) {
-        // Unreadable mid-swap; keep the previous view until next check.
-        return banCache.map;
-    }
-    banCache.path = path;
-    banCache.mtime = mtime;
-    banCache.size = st.size;
-    banCache.map = map;
-    return map;
-}
-
-function isBanned(ip, path) {
-    if (!path) {
-        return false;
-    }
-    var until = loadBans(path)[ip];
-    return until !== undefined && until * 1000 > Date.now();
-}
 
 function readCfg(s) {
     var v = s.variables;
@@ -177,22 +112,7 @@ function violate(s, cfg, st, rule, detail) {
     st.killed = true;
     st.pending = [];
     st.msgParts = [];
-    var verdict = {
-        ts: new Date().toISOString(),
-        src: s.remoteAddress,
-        service: cfg.service,
-        layer: 'ws',
-        rule: rule,
-        detail: detail === undefined ? '' : String(detail)
-    };
-    // "shield-verdict" is the grep anchor for the Phase 3 detection
-    // engine; keep the prefix and the JSON shape stable.
-    s.warn('shield-verdict ' + JSON.stringify(verdict));
-    try {
-        s.variables.shield_verdict = rule;
-    } catch (e) {
-        // js_var not declared; the error log line above still carries it.
-    }
+    core.verdict(s, cfg.service, 'ws', rule, detail);
     var notice = JSON.stringify(['NOTICE', 'fips-shield: connection closed: ' + rule]);
     s.sendDownstream(wsFrame(OP_TEXT, Buffer.from(notice), false));
     s.sendDownstream(closeFrame(1008, rule, false));
@@ -389,7 +309,7 @@ function onData(s, cfg, st, data, flags) {
         var now = Date.now();
         if (now >= st.banCheckAt) {
             st.banCheckAt = now + cfg.banRecheck * 1000;
-            if (isBanned(s.remoteAddress, cfg.banFile)) {
+            if (core.isBanned(s.remoteAddress, cfg.banFile)) {
                 return violate(s, cfg, st, 'banned', 'session-cut');
             }
         }
@@ -466,25 +386,4 @@ function filter(s) {
     });
 }
 
-// js_access hook: reject banned sources at connection accept, before
-// any proxying. Verdict rule "banned" is deliberately excluded from
-// the detection engine's filters — enforcement must not feed back into
-// detection.
-function access(s) {
-    var path = s.variables.shield_ban_file;
-    if (path && isBanned(s.remoteAddress, path)) {
-        s.warn('shield-verdict ' + JSON.stringify({
-            ts: new Date().toISOString(),
-            src: s.remoteAddress,
-            service: s.variables.shield_service || 'unknown',
-            layer: 'ban',
-            rule: 'banned',
-            detail: 'rejected-at-accept'
-        }));
-        s.deny();
-        return;
-    }
-    s.allow();
-}
-
-export default { filter, access };
+export default { filter };
