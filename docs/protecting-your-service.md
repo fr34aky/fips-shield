@@ -1,9 +1,11 @@
 # Protecting your own service
 
 fips-shield is not Nostr-specific. The Nostr relay profile is just the
-one that also understands the *protocol*; the protections that matter
-most — bans, connection-rate limits, concurrency caps, idle reaping —
-work for any TCP service without the shield knowing anything about it.
+one that also understands *that* protocol. There is a general HTTP
+profile for web apps and APIs, and a general TCP profile for everything
+else — and the protections that matter most (bans, connection-rate
+limits, concurrency caps, idle reaping) work for any service, whether
+or not the shield understands what it is carrying.
 
 This page is a cookbook. Start with [Which approach do I need?](#which-approach-do-i-need),
 then jump to the recipe that matches your service.
@@ -22,12 +24,16 @@ then jump to the recipe that matches your service.
 
 | Your situation | Use |
 |---|---|
-| Any TCP service; you want bans, rate limits, connection caps | the **`tcp` profile** — 5 minutes, no code |
-| Several TCP services on one node | **copy the `tcp` profile** once per service |
-| You need rules based on the *contents* of the traffic | **write a profile** ([writing-a-profile.md](writing-a-profile.md)) |
+| An HTTP service — API, dashboard, website | the **`http` profile** — request limits, method/path allowlists |
+| Any other TCP service — SSH, database, game server | the **`tcp` profile** — connection-level protection |
+| Several services on one node | **copy the matching profile** once per service |
+| A Nostr relay | the **`strfry` profile** ([README](../profiles/strfry/README.md)) |
+| You need rules based on the *contents* of another protocol | **write a profile** ([writing-a-profile.md](writing-a-profile.md)) |
 | UDP service | not supported today (see [below](#things-that-will-not-work)) |
 
-Most people need the first row.
+The first two rows cover almost everything. The rule of thumb: if the
+service speaks HTTP, use the `http` profile, because a single
+connection can otherwise carry unlimited expensive requests.
 
 ## The pattern behind every recipe
 
@@ -125,31 +131,47 @@ reach it at all, and no single peer can exhaust it.
 
 ## An internal HTTP API
 
-The `tcp` profile protects HTTP services at the connection level:
-bans, connection rate, concurrency, idle reaping. That covers the
-common abuse patterns and needs no HTTP-specific setup.
+Use the `http` profile: it parses HTTP, so it can price *requests*
+rather than only connections, and can refuse methods, paths, and
+oversized bodies before your app allocates anything.
+
+**1. Bind the app to loopback** (`127.0.0.1:3000` in this example).
+
+**2. Configure the shield:**
 
 ```sh
-SHIELD_PROFILES=tcp
-SHIELD_TCP_SERVICE=api
-SHIELD_TCP_LISTEN_PORT=8080
-SHIELD_TCP_UPSTREAM=127.0.0.1:3000
-SHIELD_TCP_CONN_RATE=120           # HTTP clients open connections readily
-SHIELD_TCP_MAX_CONNS_PER_NODE=30
-SHIELD_TCP_IDLE_TIMEOUT=75s        # keep-alive idle, then reap
+SHIELD_PROFILES=http
+SHIELD_HTTP_SERVICE=api
+SHIELD_HTTP_LISTEN_PORT=8080
+SHIELD_HTTP_UPSTREAM=127.0.0.1:3000
+SHIELD_HTTP_REQ_RATE=20r/s          # sustained requests per node
+SHIELD_HTTP_REQ_BURST=40            # short spikes above the rate
+SHIELD_HTTP_METHODS=GET|HEAD|POST   # 405 for anything else
+SHIELD_HTTP_PATH_REGEX=/api/.*|/health   # 444 for anything else
+SHIELD_HTTP_MAX_BODY=256k           # 413 for anything bigger
+SHIELD_HTTP_MAX_CONNS_PER_NODE=30
 ```
 
-**When you need more.** Per-*request* rate limiting, path and method
-allowlists, and header/body size caps need an HTTP-aware profile —
-nginx sees requests only when it proxies in HTTP mode. The `strfry`
-profile is a working example of that shape (an HTTP stage behind the
-stream stage); copy its `10-strfry.conf.template` and strip the
-Nostr-specific parts. See [writing-a-profile.md](writing-a-profile.md).
+**3. Apply**, and open port 8080 in the mesh firewall if you run it.
 
-Rule of thumb: if a single connection can carry unlimited expensive
-requests, you eventually want an HTTP-aware profile. If clients open a
-connection per request or two, connection-level limits already do most
-of the work.
+Peers reach it at `http://<npub>.fips:8080/api/...`, and your app sees
+the peer's mesh address in `X-Real-IP` — a node identity, so it is
+worth logging and usable for the app's own accounting.
+
+> **Narrowing the path regex is the cheapest security win here.** The
+> default (`.*`) exposes the whole app. If the same server also serves
+> an admin panel, `/api/.*|/health` hides it — requests elsewhere are
+> closed silently, and the app never sees them. The regex is matched
+> against the decoded, normalised URI, so `%2e%2e/` traversal cannot
+> get around it.
+
+**A static site or dashboard** is the same recipe with
+`SHIELD_HTTP_METHODS=GET|HEAD` and a larger `SHIELD_HTTP_REQ_BURST`
+(browsers fetch many assets at once).
+
+**WebSockets** are forwarded and get all the connection-level
+protections, but their payloads are not inspected — that needs a
+protocol-aware profile like `strfry`.
 
 ---
 
@@ -179,6 +201,9 @@ SHIELD_TCP_IDLE_TIMEOUT=10m        # clones can be slow; don't be aggressive
 The `tcp` profile describes *one* service. For several, copy it once
 per service — each copy gets its own port, limits, and log file. This
 recipe is verified to work with all profiles enabled simultaneously.
+
+Copy whichever profile matches each service (`http` for HTTP apps,
+`tcp` otherwise).
 
 ```sh
 cd fips-shield

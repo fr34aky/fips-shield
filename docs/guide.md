@@ -65,8 +65,8 @@ raw bandwidth floods.
 
 ## 2. How it works
 
-Traffic passes through up to four layers on its way in. Each is
-optional except the proxy itself:
+Traffic passes through up to four layers on its way in. Which ones
+apply depends on the profile you choose:
 
 ```text
 peer ──▶ fips0
@@ -78,10 +78,13 @@ peer ──▶ fips0
    2. connection layer     is this peer banned? too many connections?
           │                connecting too often?
           ▼
-   3. message layer        (protocol-aware profiles only)
-          │                is what they're sending acceptable?
+   3. request layer        (http/strfry profiles) too many requests?
+          │                a method or path you don't expose?
           ▼
-   4. your service         only clean traffic arrives
+   4. message layer        (protocol-aware profiles) is what they're
+          │                sending inside the connection acceptable?
+          ▼
+   5. your service         only clean traffic arrives
 ```
 
 Alongside them, a **detection engine** (fail2ban) reads the shield's
@@ -95,12 +98,13 @@ logs and bans peers that keep misbehaving:
 
 **Profiles** decide *what* is protected. A profile is a small config
 file describing one service: which port to listen on, where the real
-service is, and its limits. Two ship with the project:
+service is, and its limits. Three ship with the project:
 
 | Profile | For | Protection depth |
 |---|---|---|
-| `tcp` | any plain TCP service — SSH, databases, APIs, game servers | connection layer |
-| `strfry` | Nostr relays over WebSocket | connection **and** message layer |
+| `tcp` | any plain TCP service — SSH, databases, game servers | connection layer |
+| `http` | any HTTP app — APIs, dashboards, websites | connection **and** request layer |
+| `strfry` | Nostr relays over WebSocket | connection, request **and** message layer |
 
 You can enable several at once, and writing your own is usually one
 file ([writing-a-profile.md](writing-a-profile.md)).
@@ -309,15 +313,19 @@ Everything the shield can do, and where each thing is configured.
 | Idle reaping | connections held open doing nothing | `SHIELD_*_IDLE_TIMEOUT` |
 | Session logging | (feeds detection) | always on |
 
-### HTTP layer (profiles with an HTTP stage, e.g. `strfry`)
+### Request layer (`http` and `strfry` profiles)
 
-| Feature | What it stops | Setting |
+| Feature | What it stops | Setting (`http` profile) |
 |---|---|---|
-| Request-rate limit | request floods, handshake churn | `SHIELD_HANDSHAKE_RATE`, `_BURST` |
-| Method/path allowlist | probing endpoints you don't expose | in the profile config |
-| Header/body caps | oversized-header and slow-header attacks | in the profile config |
-| Slow-client timeouts | slowloris | in the profile config |
-| Silent close (444) | gives scanners nothing to fingerprint | in the profile config |
+| Request-rate limit | request floods on one connection | `SHIELD_HTTP_REQ_RATE`, `_BURST` |
+| Method allowlist | writes to a read-only service | `SHIELD_HTTP_METHODS` |
+| Path allowlist | probing routes you don't expose | `SHIELD_HTTP_PATH_REGEX` |
+| Body size cap | memory-exhausting uploads | `SHIELD_HTTP_MAX_BODY` |
+| Slow-client timeouts | slowloris | built in |
+| Silent close (444) | gives scanners nothing to fingerprint | built in |
+
+The `strfry` profile has the same layer with its own knobs
+(`SHIELD_HANDSHAKE_RATE`, `_BURST`), tuned for relay handshakes.
 
 ### Message layer (protocol-aware profiles, today: `strfry`)
 

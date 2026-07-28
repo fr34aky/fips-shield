@@ -6,9 +6,11 @@ connection floods, handshake churn, slow clients, and protocol-level
 floods inside established connections. nginx is the enforcement proxy,
 fail2ban the detection engine, and eBPF the kernel-level ban layer.
 
-Ships with two profiles: **strfry** (Nostr relays, with WebSocket
-message-aware filtering) and **tcp** (any plain TCP service — SSH,
-databases, APIs). Adding another service is usually one template file.
+Ships with three profiles: **strfry** (Nostr relays, with WebSocket
+message-aware filtering), **http** (any HTTP app — request rate limits,
+method and path allowlists, body caps), and **tcp** (any plain TCP
+service — SSH, databases, game servers). Adding another service is
+usually one template file.
 
 > **📖 New here? Read the [user guide](docs/guide.md).** It covers
 > installation, configuration, and operation from scratch. To protect
@@ -65,8 +67,9 @@ mechanisms:
 
 - **Profiles** (`profiles/<service>/`) — per-service nginx config +
   rules + docs. Adding a service is usually **one template file**;
-  everything else is inherited from the core. Two ship today: `strfry`
-  (Nostr over WebSocket, protocol-aware) and `tcp` (any plain TCP
+  everything else is inherited from the core. Three ship today:
+  `strfry` (Nostr over WebSocket, protocol-aware), `http` (any HTTP
+  app, request-level filtering), and `tcp` (any plain TCP
   service). See [docs/writing-a-profile.md](docs/writing-a-profile.md).
 - **Detection modules** — anything emitting a verdict in the frozen
   schema ([docs/verdict-schema.md](docs/verdict-schema.md)) into the
@@ -90,13 +93,15 @@ core/actions/      shield-ban — enforcement backend CLI (frozen contract)
 guard/             fips-guard — eBPF enforcement backend (Rust/aya + a
                    tc classifier in C), same CLI, kernel-level drops
 profiles/strfry/   strfry relay: http vhost + stream stage, WS-aware
+profiles/http/     any HTTP app: request rate, method/path allowlists
 profiles/tcp/      any plain TCP service: one stream server block
 deploy/container/  Dockerfiles (shield, fail2ban sidecar) + compose
 deploy/host/       render.sh, install-fail2ban.sh + README for running
                    directly on the fips node
 test/              validate.sh (static), ws_smoke.sh (WS policy),
                    ban_smoke.sh (detection→enforcement loop),
-                   tcp_smoke.sh (generic profile), guard_smoke.sh (eBPF)
+                   tcp_smoke.sh, http_smoke.sh (generic profiles),
+                   guard_smoke.sh (eBPF)
 Makefile           build / test / install targets (make help)
 docs/               guide.md (start here), protecting-your-service.md
                     (cookbook), writing-a-profile.md, verdict-schema.md,
@@ -161,6 +166,7 @@ make validate        # static: render every profile, nginx -t, fail2ban -t
 make test-ws         # behavioral: WS clients vs. the message policy
 make test-ban        # behavioral: detection -> enforcement loop
 make test-tcp        # behavioral: generic TCP profile
+make test-http       # behavioral: generic HTTP profile
 make test-guard      # behavioral: eBPF drops/throttle (privileged, Linux)
 ```
 

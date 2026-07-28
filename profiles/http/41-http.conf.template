@@ -1,0 +1,77 @@
+# fips-shield profile: generic HTTP service — http stage.
+#
+# Sits on loopback behind the stream stage (40-http.stream) and adds
+# the request-level protections that only exist once nginx parses HTTP:
+# per-node request rate, method and path allowlists, body and header
+# caps, slow-client timeouts. WebSocket upgrades are forwarded, but
+# their payloads are not inspected — that needs a protocol-aware
+# profile (see docs/writing-a-profile.md).
+#
+# Rejections are visible to the detection engine through the access log
+# (429 = rate limited, 405 = method, 444 = path), so repeat offenders
+# get banned by the existing jails with no extra configuration.
+
+# Per-node request rate. Its own zone, so this profile's rate is
+# independent of any other profile's.
+limit_req_zone $binary_remote_addr zone=shield_http_req:${SHIELD_CONN_ZONE_SIZE} rate=${SHIELD_HTTP_REQ_RATE};
+
+# Method allowlist: anything not listed is refused before it reaches
+# the application.
+map $request_method $shield_http_method_ok {
+    default 0;
+    ~^(${SHIELD_HTTP_METHODS})$ 1;
+}
+
+# Path allowlist, matched against the normalised, decoded URI (so
+# ../ and %2e traversal cannot slip past it). The default of .* allows
+# everything; narrow it to expose only the routes you mean to.
+map $uri $shield_http_path_ok {
+    default 0;
+    ~^(${SHIELD_HTTP_PATH_REGEX})$ 1;
+}
+
+server {
+    listen 127.0.0.1:${SHIELD_HTTP_STAGE_PORT} proxy_protocol;
+    server_name ${SHIELD_HTTP_SERVER_NAME};
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    access_log /var/log/nginx/shield-${SHIELD_HTTP_SERVICE}.access.log shield_json;
+
+    # Body and header limits, plus slow-client containment (slowloris).
+    client_max_body_size ${SHIELD_HTTP_MAX_BODY};
+    client_header_timeout 10s;
+    client_body_timeout 30s;
+    large_client_header_buffers 4 8k;
+    keepalive_timeout ${SHIELD_HTTP_IDLE_TIMEOUT};
+
+    limit_conn shield_conn ${SHIELD_HTTP_MAX_CONNS_PER_NODE};
+
+    location / {
+        limit_req zone=shield_http_req burst=${SHIELD_HTTP_REQ_BURST} nodelay;
+
+        if ($shield_http_method_ok = 0) {
+            return 405;
+        }
+        # Unlisted paths get a silent close rather than a 404, so
+        # scanners learn nothing about what exists.
+        if ($shield_http_path_ok = 0) {
+            return 444;
+        }
+
+        proxy_pass http://${SHIELD_HTTP_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $shield_connection_upgrade;
+        proxy_set_header Host $host;
+        # The mesh address of the peer — a node identity, not a
+        # rotating client IP, so it is worth logging upstream too.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout ${SHIELD_HTTP_IDLE_TIMEOUT};
+        proxy_read_timeout ${SHIELD_HTTP_IDLE_TIMEOUT};
+    }
+}

@@ -46,7 +46,7 @@ server {
 
     js_filter shield_ws.filter;
 
-    proxy_pass 127.0.0.1:${SHIELD_HTTP_PORT};
+    proxy_pass 127.0.0.1:${SHIELD_STRFRY_HTTP_PORT};
     proxy_protocol on;
     # Also the reaper for sessions the engine has killed but whose
     # upstream ignored the injected Close frame.

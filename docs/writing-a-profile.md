@@ -6,12 +6,14 @@ logging, session logs, limit zones, the njs engine loader — lives in
 `core/` and is shared. In the common case a profile is **one template
 file**.
 
-Two exist today and bracket the range:
+Three exist today and bracket the range:
 
 - `profiles/tcp/` — a plain TCP service, no payload inspection. One
   30-line stream server block.
+- `profiles/http/` — any HTTP app: a stream stage plus an http stage
+  adding request-level limits, without knowing the application.
 - `profiles/strfry/` — Nostr over WebSocket, with a protocol-aware
-  inspection module and a second (http) stage.
+  inspection module on top of both.
 
 ## The moving parts
 

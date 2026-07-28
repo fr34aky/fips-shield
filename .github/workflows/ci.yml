@@ -42,6 +42,8 @@ jobs:
         run: test/ban_smoke.sh
       - name: generic TCP profile
         run: test/tcp_smoke.sh
+      - name: generic HTTP profile
+        run: test/http_smoke.sh
 
   guard:
     # Needs a privileged container and a kernel with BPF + BTF; the

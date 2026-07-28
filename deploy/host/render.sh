@@ -24,10 +24,17 @@ ENV_FILE="${1:?usage: render.sh <shield.env> [output-dir] [njs-dir]}"
 OUT_DIR="${2:-/etc/nginx/conf.d}"
 NJS_DIR="${3:-/etc/nginx/njs}"
 
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
+# Read KEY=VALUE literally, exactly as docker --env-file does. Sourcing
+# the file with "." would run it through the shell, so a value like
+# GET|HEAD|POST would be parsed as a pipeline, and quotes would be
+# stripped here but taken literally by docker — the two deploy modes
+# must agree.
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}
+    case "$key" in [A-Za-z_]*) export "$key=${line#*=}" ;; esac
+done < "$ENV_FILE"
 
 TEMPLATES=("$REPO_ROOT"/core/nginx/*.template)
 for profile in $(echo "${SHIELD_PROFILES:-strfry}" | tr ',' ' '); do

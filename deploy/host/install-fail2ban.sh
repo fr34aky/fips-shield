@@ -13,10 +13,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${1:?usage: install-fail2ban.sh <shield.env>}"
 F2B_DIR="${2:-/etc/fail2ban}"
 
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
+# Read KEY=VALUE literally, exactly as docker --env-file does. Sourcing
+# the file with "." would run it through the shell, so a value like
+# GET|HEAD|POST would be parsed as a pipeline, and quotes would be
+# stripped here but taken literally by docker — the two deploy modes
+# must agree.
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}
+    case "$key" in [A-Za-z_]*) export "$key=${line#*=}" ;; esac
+done < "$ENV_FILE"
 
 install -m 644 "$REPO_ROOT"/core/fail2ban/filter.d/*.conf "$F2B_DIR/filter.d/"
 install -m 644 "$REPO_ROOT"/core/fail2ban/action.d/*.conf "$F2B_DIR/action.d/"
