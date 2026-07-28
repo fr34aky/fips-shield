@@ -64,6 +64,39 @@ for t in "${TEMPLATES[@]}"; do
     echo "rendered $out"
 done
 
+# Socket directory for the stream->http hop. nginx chmods unix listen
+# sockets to 0666, so these directory permissions are the access
+# control: anything that can connect could spoof a client address past
+# the shield.
+# Provisioning it is best-effort: rendering configs must work as an
+# unprivileged user (that is how CI validates every profile), while the
+# directory itself needs root.
+SOCKET_DIR="${SHIELD_SOCKET_DIR:-/run/fips-shield}"
+if mkdir -p "$SOCKET_DIR" 2>/dev/null && chmod 700 "$SOCKET_DIR" 2>/dev/null; then
+    # Guarded: with `set -o pipefail`, a missing nginx binary would
+    # abort the whole render — and rendering must work on hosts (and
+    # CI runners) where nginx is not installed.
+    worker_user=""
+    if command -v nginx >/dev/null 2>&1; then
+        worker_user="$(nginx -T 2>/dev/null \
+            | awk '/^[[:space:]]*user[[:space:]]/ {print $2; exit}' \
+            | tr -d ';' || true)"
+    fi
+    if [ -n "$worker_user" ] && id "$worker_user" >/dev/null 2>&1; then
+        chown "$worker_user" "$SOCKET_DIR" 2>/dev/null \
+            && echo "socket dir $SOCKET_DIR (0700, owned by $worker_user)"
+    else
+        echo "warning: could not determine the nginx worker user; chown" \
+             "$SOCKET_DIR to it by hand or nginx workers cannot connect" >&2
+    fi
+else
+    echo "note: create $SOCKET_DIR yourself (0700, owned by the nginx" \
+         "worker user) — nginx cannot connect the stages without it" >&2
+fi
+# /run is usually a tmpfs, so the directory needs recreating at boot.
+echo "tip: install deploy/host/fips-shield-tmpfiles.conf into" \
+     "/etc/tmpfiles.d/ so $SOCKET_DIR survives a reboot"
+
 cp "$REPO_ROOT"/core/njs/*.js "$NJS_DIR"/
 echo "installed $NJS_DIR/{$(cd "$REPO_ROOT"/core/njs && echo *.js | tr ' ' ',')}"
 

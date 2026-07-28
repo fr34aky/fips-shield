@@ -5,6 +5,10 @@
 # to only validate the configuration).
 set -eu
 
+envsubst '${SHIELD_BAN_FILE}' \
+    < /etc/fail2ban/fips-shield-action.conf.template \
+    > /etc/fail2ban/action.d/fips-shield.conf
+
 envsubst '${SHIELD_F2B_FINDTIME} ${SHIELD_F2B_BANTIME} ${SHIELD_F2B_IGNOREIP}
           ${SHIELD_F2B_IGNORESELF} ${SHIELD_F2B_HANDSHAKE_MAXRETRY}
           ${SHIELD_F2B_VERDICT_MAXRETRY} ${SHIELD_F2B_SCAN_MAXRETRY}' \

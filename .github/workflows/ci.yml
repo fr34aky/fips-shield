@@ -31,6 +31,10 @@ jobs:
       # Renders every profile alone and all together, builds both
       # images, and runs nginx -t plus fail2ban-client -t.
       - run: test/validate.sh
+      # fail2ban-client -t only proves the config parses; this proves
+      # the filters actually match the log lines the shield writes.
+      - name: fail2ban filters match real log lines
+        run: test/filters_test.sh
 
   behavioral:
     runs-on: ubuntu-24.04

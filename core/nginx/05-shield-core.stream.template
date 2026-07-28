@@ -11,6 +11,9 @@ js_import shield_ws from shield_ws.js;
 
 # Set by the engine when it refuses or cuts a session; empty otherwise.
 js_var $shield_verdict '';
+# Written by the engine from the port-keyed policy, so the session log
+# records which profile handled the connection.
+js_var $shield_service '';
 
 # Connection-rate counters. The stream module has limit_conn but no
 # limit_req, so the rate limit lives in the engine and needs shared

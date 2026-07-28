@@ -146,7 +146,7 @@ SHIELD_HTTP_LISTEN_PORT=8080
 SHIELD_HTTP_UPSTREAM=127.0.0.1:3000
 SHIELD_HTTP_REQ_RATE=20r/s          # sustained requests per node
 SHIELD_HTTP_REQ_BURST=40            # short spikes above the rate
-SHIELD_HTTP_METHODS=GET|HEAD|POST   # 405 for anything else
+SHIELD_HTTP_METHODS=GET HEAD POST   # 403 for anything else
 SHIELD_HTTP_PATH_REGEX=/api/.*|/health   # 444 for anything else
 SHIELD_HTTP_MAX_BODY=256k           # 413 for anything bigger
 SHIELD_HTTP_MAX_CONNS_PER_NODE=30
@@ -166,7 +166,7 @@ worth logging and usable for the app's own accounting.
 > get around it.
 
 **A static site or dashboard** is the same recipe with
-`SHIELD_HTTP_METHODS=GET|HEAD` and a larger `SHIELD_HTTP_REQ_BURST`
+`SHIELD_HTTP_METHODS=GET HEAD` and a larger `SHIELD_HTTP_REQ_BURST`
 (browsers fetch many assets at once).
 
 **WebSockets** are forwarded and get all the connection-level

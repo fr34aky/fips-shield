@@ -318,7 +318,7 @@ Everything the shield can do, and where each thing is configured.
 | Feature | What it stops | Setting (`http` profile) |
 |---|---|---|
 | Request-rate limit | request floods on one connection | `SHIELD_HTTP_REQ_RATE`, `_BURST` |
-| Method allowlist | writes to a read-only service | `SHIELD_HTTP_METHODS` |
+| Method allowlist | writes to a read-only service | `SHIELD_HTTP_METHODS` (space-separated) |
 | Path allowlist | probing routes you don't expose | `SHIELD_HTTP_PATH_REGEX` |
 | Body size cap | memory-exhausting uploads | `SHIELD_HTTP_MAX_BODY` |
 | Slow-client timeouts | slowloris | built in |

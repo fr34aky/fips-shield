@@ -74,6 +74,18 @@ def request(path="/", method="GET", body=None, timeout=5):
         return 0, b""
 
 
+def request_full(path="/", method="GET", body=None, timeout=5):
+    """Like request(), but also returns the response headers."""
+    req = urllib.request.Request(SHIELD + path, method=method, data=body)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+    except (urllib.error.URLError, ConnectionError, socket.timeout):
+        return 0, b"", {}
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     start_app()
@@ -86,10 +98,16 @@ def main():
         check("banned node's request never reached the app",
               not any("/allowed/x" == p for p in seen_paths))
     else:
-        status, body = request("/allowed/hello")
+        status, body, hdrs = request_full("/allowed/hello")
         check("allowed request reaches the app",
               status == 200 and b"app-ok GET /allowed/hello" in body,
               f"status={status} body={body[:60]}")
+        # If the PROXY-protocol/real-IP path broke, every peer would
+        # look like the socket peer and all the per-node limits would
+        # silently become global.
+        check("app sees the peer's mesh address, not the proxy",
+              hdrs.get("X-Client") == "::1",
+              f"X-Client={hdrs.get('X-Client')}")
 
         status, body = request("/allowed/thing", method="POST", body=b"x=1")
         check("allowed method passes", status == 200 and b"POST" in body,
@@ -97,7 +115,10 @@ def main():
 
         before = len(seen_paths)
         status, _ = request("/allowed/x", method="DELETE")
-        check("disallowed method is rejected (405)", status == 405,
+        # 403 from limit_except (access phase) rather than 405 from an
+        # `if` in the rewrite phase — the point being that this request
+        # is counted against the rate limit before it is refused.
+        check("disallowed method is rejected (403)", status == 403,
               f"status={status}")
         check("rejected method never reached the app",
               len(seen_paths) == before)

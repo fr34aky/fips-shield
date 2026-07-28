@@ -20,5 +20,13 @@ COPY profiles/ /etc/nginx/profiles/
 COPY deploy/container/shield-entrypoint.sh /shield-entrypoint.sh
 RUN chmod +x /shield-entrypoint.sh
 
+# Sockets joining each profile's stream stage to its http stage. nginx
+# chmods unix listen sockets to 0666, so the directory permissions are
+# what keep other local processes from connecting and spoofing a client
+# address past the shield: 0700, owned by the worker user.
+RUN mkdir -p /run/fips-shield \
+    && chown nginx:nginx /run/fips-shield \
+    && chmod 700 /run/fips-shield
+
 ENTRYPOINT ["/shield-entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]

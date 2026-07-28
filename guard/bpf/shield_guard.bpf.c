@@ -32,15 +32,19 @@ static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
 static long (*bpf_map_update_elem)(void *map, const void *key,
                                    const void *value, __u64 flags) = (void *)2;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
+static long (*bpf_skb_load_bytes_relative)(const void *skb, __u32 offset,
+                                           void *to, __u32 len,
+                                           __u32 start_header) = (void *)68;
 
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
 
 #define ETH_P_IPV6 0x86DD
-#define ETH_HLEN 14
-// Offsets within an IPv6 header.
+// Source-address offset within the IPv6 header.
 #define IP6_SADDR_OFF 8
-#define IP6_SADDR_END 24
+// Mode for bpf_skb_load_bytes_relative: offsets are relative to the
+// network header, so the ethernet header (if any) is already skipped.
+#define BPF_HDR_START_NET 1
 
 #define MAX_TRACKED 65536
 
@@ -49,7 +53,8 @@ static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
 #define ST_DROPPED_BAN 1
 #define ST_DROPPED_THROTTLE 2
 #define ST_NOT_IPV6 3
-#define ST_COUNT 4
+#define ST_PARSE_FAILED 4
+#define ST_COUNT 5
 
 struct addr6 {
     __u8 b[16];
@@ -113,30 +118,24 @@ static __always_inline void bump(__u32 slot)
         *v += 1;
 }
 
-// Copies the IPv6 source address out of the packet. Handles both L3
-// devices (TUN: the packet starts with the IPv6 header, which is what
-// fips0 delivers) and L2 devices (the ethernet header comes first).
-// Constant offsets in both branches keep the verifier happy.
+// Copies the IPv6 source address out of the packet.
+//
+// The offset is taken relative to the network header, which the kernel
+// already knows, so this is correct on both L3 devices (TUN: fips0
+// delivers packets with no ethernet header) and L2 devices, with no
+// guessing. An earlier version inferred the layout from the first
+// byte's version nibble; that misread any ethernet frame whose
+// destination MAC happened to start with nibble 6 (~6% of random MACs)
+// as an L3 packet, silently reading the wrong 16 bytes as the source
+// address and letting banned traffic through.
+//
+// Using the helper rather than direct data access also removes the
+// dependence on those bytes being in the skb's linear area.
 static __always_inline int load_saddr(struct __sk_buff *skb, struct addr6 *out)
 {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
-    if (data + 1 > data_end)
+    if (bpf_skb_load_bytes_relative(skb, IP6_SADDR_OFF, out->b, 16,
+                                    BPF_HDR_START_NET) < 0)
         return -1;
-
-    if ((*(__u8 *)data >> 4) == 6) {
-        if (data + IP6_SADDR_END > data_end)
-            return -1;
-        __builtin_memcpy(out->b, data + IP6_SADDR_OFF, 16);
-        return 0;
-    }
-
-    if (data + ETH_HLEN + IP6_SADDR_END > data_end)
-        return -1;
-    if ((*(__u8 *)(data + ETH_HLEN) >> 4) != 6)
-        return -1;
-    __builtin_memcpy(out->b, data + ETH_HLEN + IP6_SADDR_OFF, 16);
     return 0;
 }
 
@@ -151,7 +150,10 @@ int shield_guard(struct __sk_buff *skb)
 
     struct addr6 src;
     if (load_saddr(skb, &src) < 0) {
-        bump(ST_NOT_IPV6);
+        // Counted separately from ordinary non-IPv6 traffic: a rising
+        // parse-failure count means enforcement is silently degraded,
+        // which must not hide inside a counter that normally moves.
+        bump(ST_PARSE_FAILED);
         return TC_ACT_OK;
     }
 

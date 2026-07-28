@@ -1,0 +1,18 @@
+# fips-shield banaction: delegate to the shield-ban backend CLI
+# (docs/verdict-schema.md). Swapping the enforcement backend (e.g. the
+# eBPF guard) means pointing this at a different binary with the same
+# CLI — the jails don't change.
+#
+# SHIELD_BAN_FILE is passed explicitly rather than inherited: fail2ban
+# runs actions with its own environment, which in host mode does not
+# contain anything from shield.env. Without this, a non-default ban
+# file means fail2ban writes bans to one path while nginx reads
+# another — enforcement silently does nothing while every log says it
+# worked.
+
+[Definition]
+actionstart =
+actionstop =
+actioncheck =
+actionban = SHIELD_BAN_FILE=${SHIELD_BAN_FILE} /usr/local/bin/shield-ban ban <ip> <bantime>
+actionunban = SHIELD_BAN_FILE=${SHIELD_BAN_FILE} /usr/local/bin/shield-ban unban <ip>

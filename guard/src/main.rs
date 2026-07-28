@@ -38,6 +38,7 @@ const ST_PASSED: u32 = 0;
 const ST_DROPPED_BAN: u32 = 1;
 const ST_DROPPED_THROTTLE: u32 = 2;
 const ST_NOT_IPV6: u32 = 3;
+const ST_PARSE_FAILED: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -89,13 +90,17 @@ enum Cmd {
         #[arg(long, env = "SHIELD_GUARD_BURST_PKTS", default_value_t = 0)]
         burst: u64,
     },
-    /// Detach the classifier and remove the pinned maps.
+    /// Detach the classifier. Active bans are kept (the maps stay
+    /// pinned) unless --purge is given.
     Unload {
         #[arg(long, env = "SHIELD_GUARD_IFACE", default_value = DEFAULT_IFACE)]
         iface: String,
+        /// Also remove the pinned maps, discarding every active ban.
+        #[arg(long)]
+        purge: bool,
     },
-    /// Ban a source for <seconds> (0 = until unbanned).
-    Ban { ip: String, seconds: u64 },
+    /// Ban a source for <seconds> (0 or negative = until unbanned).
+    Ban { ip: String, seconds: i64 },
     /// Remove a ban.
     Unban { ip: String },
     /// Exit 0 (and print the expiry) if banned, 1 if not.
@@ -211,10 +216,31 @@ fn cmd_load(pin_dir: &Path, iface: &str, rate: u64, burst: u64) -> Result<()> {
     Ok(())
 }
 
-fn cmd_unload(pin_dir: &Path, iface: &str) -> Result<()> {
-    match tc::qdisc_detach_program(iface, TcAttachType::Ingress, PROG_NAME) {
-        Ok(()) => println!("detached from {iface}"),
-        Err(e) => eprintln!("warning: detach from {iface}: {e}"),
+fn cmd_unload(pin_dir: &Path, iface: &str, purge: bool) -> Result<()> {
+    let detached = match tc::qdisc_detach_program(iface, TcAttachType::Ingress, PROG_NAME) {
+        Ok(()) => {
+            println!("detached from {iface}");
+            true
+        }
+        Err(e) => {
+            eprintln!("warning: detach from {iface}: {e}");
+            false
+        }
+    };
+    if !purge {
+        // Default: keep the maps pinned so a restart (systemd restarts
+        // this unit whenever fips.service restarts) re-attaches with
+        // every active ban intact.
+        println!(
+            "maps left pinned at {} (use --purge to discard bans)",
+            pin_dir.display()
+        );
+        return Ok(());
+    }
+    if !detached {
+        // Unpinning a still-attached program orphans it: it keeps
+        // dropping traffic with no way left to manage its maps.
+        bail!("refusing to purge maps: the program is still attached to {iface}");
     }
     for name in [
         "shield_bans",
@@ -248,21 +274,26 @@ fn set_config(pin_dir: &Path, rate: u64, burst: u64) -> Result<()> {
     Ok(())
 }
 
-fn cmd_ban(pin_dir: &Path, ip: &str, seconds: u64) -> Result<()> {
+fn cmd_ban(pin_dir: &Path, ip: &str, seconds: i64) -> Result<()> {
     let Some(addr) = parse_v6(ip)? else {
         eprintln!("note: {ip} is IPv4; the mesh is IPv6-only, nothing to do");
         return Ok(());
     };
     let mut bans = bans_map(pin_dir)?;
-    let val = if seconds == 0 {
+    // fail2ban renders a permanent ban as -1, and 0 is this CLI's own
+    // encoding for the same thing; both must mean "until unbanned"
+    // rather than being rejected as a bad argument, which would leave
+    // the peer unbanned while fail2ban logged a success.
+    let val = if seconds <= 0 {
         BanVal {
             expires_mono_ns: 0,
             expires_epoch_s: 0,
         }
     } else {
+        let secs = seconds as u64;
         BanVal {
-            expires_mono_ns: now_mono_ns() + seconds.saturating_mul(1_000_000_000),
-            expires_epoch_s: now_epoch_s() + seconds,
+            expires_mono_ns: now_mono_ns().saturating_add(secs.saturating_mul(1_000_000_000)),
+            expires_epoch_s: now_epoch_s().saturating_add(secs),
         }
     };
     bans.insert(Addr6 { b: addr.octets() }, val, 0)
@@ -342,6 +373,7 @@ fn cmd_stats(pin_dir: &Path) -> Result<()> {
     println!("dropped (ban)      {}", sum(ST_DROPPED_BAN)?);
     println!("dropped (throttle) {}", sum(ST_DROPPED_THROTTLE)?);
     println!("not ipv6           {}", sum(ST_NOT_IPV6)?);
+    println!("parse failed       {}", sum(ST_PARSE_FAILED)?);
 
     let cfg = config_map(pin_dir)?.get(&0, 0)?;
     if cfg.rate_pps > 0 {
@@ -367,7 +399,7 @@ fn main() -> ExitCode {
 
     let result = match &cli.cmd {
         Cmd::Load { iface, rate, burst } => cmd_load(pin_dir, iface, *rate, *burst),
-        Cmd::Unload { iface } => cmd_unload(pin_dir, iface),
+        Cmd::Unload { iface, purge } => cmd_unload(pin_dir, iface, *purge),
         Cmd::Ban { ip, seconds } => cmd_ban(pin_dir, ip, *seconds),
         Cmd::Unban { ip } => cmd_unban(pin_dir, ip),
         Cmd::Check { ip } => match cmd_check(pin_dir, ip) {

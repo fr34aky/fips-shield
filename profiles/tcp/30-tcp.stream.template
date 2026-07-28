@@ -17,11 +17,11 @@ server {
     access_log /var/log/nginx/shield-${SHIELD_TCP_SERVICE}.stream.log shield_stream_json;
     error_log /var/log/nginx/shield-error.log warn;
 
-    js_var $shield_service ${SHIELD_TCP_SERVICE};
-
-    js_var $shield_ban_file '${SHIELD_BAN_FILE}';
-    js_var $shield_conn_rate ${SHIELD_TCP_CONN_RATE};
-    js_var $shield_conn_window ${SHIELD_CONN_WINDOW};
+    # Policy for this listener. The js_var is named after the port
+    # because nginx variables are global by name: a shared
+    # $shield_conn_rate would take whichever profile nginx parsed last
+    # and silently disable the others' limits.
+    js_var $shield_cfg_${SHIELD_TCP_LISTEN_PORT} 'service=${SHIELD_TCP_SERVICE};ban_file=${SHIELD_BAN_FILE};conn_rate=${SHIELD_TCP_CONN_RATE};conn_window=${SHIELD_CONN_WINDOW}';
     js_access shield_core.access;
 
     limit_conn shield_stream_conn ${SHIELD_TCP_MAX_CONNS_PER_NODE};

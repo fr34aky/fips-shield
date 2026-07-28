@@ -12,16 +12,14 @@ server {
     access_log /var/log/nginx/shield-${SHIELD_HTTP_SERVICE}.stream.log shield_stream_json;
     error_log /var/log/nginx/shield-error.log warn;
 
-    js_var $shield_service ${SHIELD_HTTP_SERVICE};
-
-    js_var $shield_ban_file '${SHIELD_BAN_FILE}';
-    js_var $shield_conn_rate ${SHIELD_HTTP_CONN_RATE};
-    js_var $shield_conn_window ${SHIELD_CONN_WINDOW};
+    # Port-keyed policy: see the note in core/njs/shield_core.js on why
+    # a shared js_var name would leak between profiles.
+    js_var $shield_cfg_${SHIELD_HTTP_LISTEN_PORT} 'service=${SHIELD_HTTP_SERVICE};ban_file=${SHIELD_BAN_FILE};conn_rate=${SHIELD_HTTP_CONN_RATE};conn_window=${SHIELD_CONN_WINDOW}';
     js_access shield_core.access;
 
     limit_conn shield_stream_conn ${SHIELD_HTTP_MAX_CONNS_PER_NODE};
 
-    proxy_pass 127.0.0.1:${SHIELD_HTTP_STAGE_PORT};
+    proxy_pass unix:${SHIELD_SOCKET_DIR}/${SHIELD_HTTP_SERVICE}.sock;
     proxy_protocol on;
     proxy_connect_timeout 5s;
     proxy_timeout ${SHIELD_HTTP_IDLE_TIMEOUT};

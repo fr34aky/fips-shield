@@ -24,8 +24,11 @@ Request level (this profile):
 
 - **Request rate** per node (`SHIELD_HTTP_REQ_RATE` /
   `SHIELD_HTTP_REQ_BURST`) — excess gets 429.
-- **Method allowlist** (`SHIELD_HTTP_METHODS`) — anything else gets
-  405, never reaching the app.
+- **Method allowlist** (`SHIELD_HTTP_METHODS`, space-separated) —
+  anything else gets 403, never reaching the app. Enforced with
+  `limit_except` so refused requests still count against the request
+  rate; an `if`-based rejection would run before the rate limiter and
+  cost an attacker nothing.
 - **Path allowlist** (`SHIELD_HTTP_PATH_REGEX`) — matched against the
   normalised, decoded URI, so `../` and `%2e` traversal cannot slip
   past it. Unlisted paths are closed silently (444) so scanners learn
@@ -47,11 +50,11 @@ SHIELD_BIND_ADDR=fd97:...            # your fips0 address
 SHIELD_HTTP_SERVICE=web              # names the log files
 SHIELD_HTTP_LISTEN_PORT=8080         # port on the mesh address
 SHIELD_HTTP_UPSTREAM=127.0.0.1:3000  # your app — loopback only!
-SHIELD_HTTP_STAGE_PORT=8081          # internal; change only on collision
+SHIELD_SOCKET_DIR=/run/fips-shield   # private dir for the internal socket
 
 SHIELD_HTTP_REQ_RATE=20r/s
 SHIELD_HTTP_REQ_BURST=40
-SHIELD_HTTP_METHODS=GET|HEAD|POST
+SHIELD_HTTP_METHODS=GET HEAD POST
 SHIELD_HTTP_PATH_REGEX=.*
 SHIELD_HTTP_MAX_BODY=1m
 ```

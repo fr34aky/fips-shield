@@ -17,36 +17,16 @@ server {
     # the file the detection engine tails.
     error_log /var/log/nginx/shield-error.log warn;
 
-    js_var $shield_service strfry;
-
-    # Ban enforcement: reject banned sources at accept, re-check
-    # established sessions every SHIELD_BAN_RECHECK seconds.
-    js_var $shield_ban_file '${SHIELD_BAN_FILE}';
-    js_var $shield_ban_recheck ${SHIELD_BAN_RECHECK};
-    # New connections per node per window (0 = off). The http stage's
-    # limit_req prices handshakes; this prices TCP connections, which
-    # cost something even when the handshake never completes.
-    js_var $shield_conn_rate ${SHIELD_STRFRY_CONN_RATE};
-    js_var $shield_conn_window ${SHIELD_CONN_WINDOW};
+    # Port-keyed policy: nginx variables are global by name, so a
+    # shared $shield_* per-server js_var would take whichever profile
+    # was parsed last and silently apply it to all of them. One string
+    # keyed by listening port cannot collide.
+    js_var $shield_cfg_${SHIELD_LISTEN_PORT} 'service=strfry;ban_file=${SHIELD_BAN_FILE};ban_recheck=${SHIELD_BAN_RECHECK};conn_rate=${SHIELD_STRFRY_CONN_RATE};conn_window=${SHIELD_CONN_WINDOW};ws_max_msg=${SHIELD_WS_MAX_MSG};ws_max_subs=${SHIELD_WS_MAX_SUBS};ws_max_filters=${SHIELD_WS_MAX_FILTERS};ws_max_filter_items=${SHIELD_WS_MAX_FILTER_ITEMS};ws_msg_rate=${SHIELD_WS_MSG_RATE};ws_msg_burst=${SHIELD_WS_MSG_BURST};ws_event_rate=${SHIELD_WS_EVENT_RATE};ws_event_burst=${SHIELD_WS_EVENT_BURST};ws_req_rate=${SHIELD_WS_REQ_RATE};ws_req_burst=${SHIELD_WS_REQ_BURST};nostr_types=${SHIELD_NOSTR_TYPES};nostr_kind_deny=${SHIELD_NOSTR_KIND_DENY}';
     js_access shield_core.access;
-
-    # Message policy (see shield.env for per-knob documentation).
-    js_var $shield_ws_max_msg ${SHIELD_WS_MAX_MSG};
-    js_var $shield_ws_max_subs ${SHIELD_WS_MAX_SUBS};
-    js_var $shield_ws_max_filters ${SHIELD_WS_MAX_FILTERS};
-    js_var $shield_ws_max_filter_items ${SHIELD_WS_MAX_FILTER_ITEMS};
-    js_var $shield_ws_msg_rate ${SHIELD_WS_MSG_RATE};
-    js_var $shield_ws_msg_burst ${SHIELD_WS_MSG_BURST};
-    js_var $shield_ws_event_rate ${SHIELD_WS_EVENT_RATE};
-    js_var $shield_ws_event_burst ${SHIELD_WS_EVENT_BURST};
-    js_var $shield_ws_req_rate ${SHIELD_WS_REQ_RATE};
-    js_var $shield_ws_req_burst ${SHIELD_WS_REQ_BURST};
-    js_var $shield_nostr_types '${SHIELD_NOSTR_TYPES}';
-    js_var $shield_nostr_kind_deny '${SHIELD_NOSTR_KIND_DENY}';
 
     js_filter shield_ws.filter;
 
-    proxy_pass 127.0.0.1:${SHIELD_STRFRY_HTTP_PORT};
+    proxy_pass unix:${SHIELD_SOCKET_DIR}/strfry.sock;
     proxy_protocol on;
     # Also the reaper for sessions the engine has killed but whose
     # upstream ignored the injected Close frame.

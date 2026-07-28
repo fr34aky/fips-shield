@@ -33,6 +33,11 @@ docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile \
 docker run -d --name "$CONTAINER" --env-file "$WORK_DIR/shield.env" \
     fips-shield:test >/dev/null
 
+run_probe() {
+    docker run --rm --network "container:$CONTAINER" \
+        -v "$REPO_ROOT/test":/test:ro python:3-alpine python3 "/test/$1"
+}
+
 if ! docker run --rm --network "container:$CONTAINER" \
     -v "$REPO_ROOT/test":/test:ro \
     python:3-alpine python3 /test/ws_test.py; then
@@ -54,5 +59,14 @@ for rule in unmasked-client-frame oversized-message kind-denied \
         exit 1
     fi
 done
+
+# Regression tests for fixed inspection bypasses. Both were live:
+# a bare-LF handshake desynchronised this engine from nginx's HTTP
+# parser, and JavaScript prototype keys defeated the subscription cap
+# and the message-type allowlist.
+echo "--- handshake desync (bare LF) must not bypass inspection"
+run_probe bypass_probe.py
+echo "--- prototype keys must not defeat the caps"
+run_probe proto_probe.py
 
 echo "OK"

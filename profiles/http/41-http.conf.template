@@ -15,13 +15,6 @@
 # independent of any other profile's.
 limit_req_zone $binary_remote_addr zone=shield_http_req:${SHIELD_CONN_ZONE_SIZE} rate=${SHIELD_HTTP_REQ_RATE};
 
-# Method allowlist: anything not listed is refused before it reaches
-# the application.
-map $request_method $shield_http_method_ok {
-    default 0;
-    ~^(${SHIELD_HTTP_METHODS})$ 1;
-}
-
 # Path allowlist, matched against the normalised, decoded URI (so
 # ../ and %2e traversal cannot slip past it). The default of .* allows
 # everything; narrow it to expose only the routes you mean to.
@@ -30,11 +23,17 @@ map $uri $shield_http_path_ok {
     ~^(${SHIELD_HTTP_PATH_REGEX})$ 1;
 }
 
+# A unix socket in a private directory rather than a loopback port:
+# this stage trusts the PROXY-protocol header for the client address,
+# and any local process can connect to a loopback port and declare
+# whatever source address it likes — bypassing the stream stage's
+# inspection and forging log lines that get arbitrary mesh nodes
+# banned. Socket-directory permissions make that unreachable.
 server {
-    listen 127.0.0.1:${SHIELD_HTTP_STAGE_PORT} proxy_protocol;
+    listen unix:${SHIELD_SOCKET_DIR}/${SHIELD_HTTP_SERVICE}.sock proxy_protocol;
     server_name ${SHIELD_HTTP_SERVER_NAME};
 
-    set_real_ip_from 127.0.0.1;
+    set_real_ip_from unix:;
     real_ip_header proxy_protocol;
 
     access_log /var/log/nginx/shield-${SHIELD_HTTP_SERVICE}.access.log shield_json;
@@ -45,17 +44,31 @@ server {
     client_body_timeout 30s;
     large_client_header_buffers 4 8k;
     keepalive_timeout ${SHIELD_HTTP_IDLE_TIMEOUT};
+    # Bounds how many requests one connection can carry, which caps
+    # what a single connection can extract from the rewrite-phase path
+    # denial below.
+    keepalive_requests ${SHIELD_HTTP_KEEPALIVE_REQUESTS};
 
     limit_conn shield_conn ${SHIELD_HTTP_MAX_CONNS_PER_NODE};
 
     location / {
         limit_req zone=shield_http_req burst=${SHIELD_HTTP_REQ_BURST} nodelay;
 
-        if ($shield_http_method_ok = 0) {
-            return 405;
+        # Method allowlist via limit_except, which is evaluated in the
+        # access phase — i.e. AFTER limit_req. An `if (...) return 405`
+        # would run in the rewrite phase instead, so rejected requests
+        # would consume no rate budget at all and could be pumped
+        # without limit. Denials here are 403.
+        limit_except ${SHIELD_HTTP_METHODS} {
+            deny all;
         }
+
         # Unlisted paths get a silent close rather than a 404, so
-        # scanners learn nothing about what exists.
+        # scanners learn nothing about what exists. This one is a
+        # rewrite-phase return and therefore does NOT consume rate
+        # budget; it is priced instead by the stream stage's
+        # connection-rate limit, by keepalive_requests above, and by
+        # the scan jail, which bans a path scanner within seconds.
         if ($shield_http_path_ok = 0) {
             return 444;
         }

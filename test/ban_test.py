@@ -14,7 +14,7 @@ import sys
 import time
 
 from wslib import (drain, event, make_frame, read_frame, start_upstream,
-                   wait_for_shield, ws_connect)
+                   upstream_saw, wait_for_shield, ws_connect)
 
 
 def benign():
@@ -60,6 +60,10 @@ def session_cut():
     texts, saw_close = drain(sock)
     echoed = any("post-ban" in t and "NOTICE" not in t for t in texts)
     assert saw_close or not echoed, (texts, saw_close)
+    # The upstream is the authority: a regression that forwards the
+    # message and only then cuts the session would still satisfy the
+    # check above, while violating the core guarantee.
+    assert not upstream_saw("post-ban"), "banned node's message reached upstream"
     sock.close()
 
 

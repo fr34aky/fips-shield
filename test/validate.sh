@@ -28,8 +28,12 @@ for set in $PROFILES "$ALL"; do
         "$WORK_DIR/shield.env" > "$WORK_DIR/env.current"
 
     # Host-mode render path: must succeed and leave no placeholders.
+    # The socket directory is redirected into the work dir because
+    # rendering runs unprivileged and must not touch /run.
     rm -rf "$WORK_DIR/conf" "$WORK_DIR/njs"
-    "$REPO_ROOT"/deploy/host/render.sh "$WORK_DIR/env.current" \
+    sed "s|^SHIELD_SOCKET_DIR=.*|SHIELD_SOCKET_DIR=$WORK_DIR/sock|" \
+        "$WORK_DIR/env.current" > "$WORK_DIR/env.render"
+    "$REPO_ROOT"/deploy/host/render.sh "$WORK_DIR/env.render" \
         "$WORK_DIR/conf" "$WORK_DIR/njs" >/dev/null
     if grep -rnE '\$\{SHIELD_[A-Z0-9_]+\}' "$WORK_DIR/conf"; then
         echo "error: unrendered \${SHIELD_*} placeholders in output" >&2

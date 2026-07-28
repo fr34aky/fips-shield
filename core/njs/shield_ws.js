@@ -4,12 +4,17 @@
 // http proxy stage. Client->server bytes are parsed as WebSocket frames
 // (RFC 6455) and the Nostr messages inside are checked against
 // per-connection policy before being forwarded — a rejected message is
-// never seen by the upstream. Server->client traffic passes untouched.
+// never seen by the upstream. Server->client traffic is forwarded
+// as-is; it is only examined to confirm the session was classified
+// correctly (see the downstream backstop in filter()).
 //
 // Sessions that are not WebSocket (no "Upgrade: websocket" in the
 // client handshake, e.g. NIP-11 fetches) pass through unmodified; the
 // http stage forces "Connection: close" on those, so a client cannot
 // smuggle a later upgrade past the sniffer on a kept-alive connection.
+// The handshake is buffered whole and rejected if it uses bare-LF line
+// endings, so this sniffer and nginx's parser cannot disagree about
+// where the headers end or whether an upgrade was requested.
 //
 // The http stage strips Sec-WebSocket-Extensions from the handshake,
 // so frames are never permessage-deflate compressed and the payloads
@@ -45,21 +50,32 @@ var OP_CLOSE = 0x8;
 var MAX_HANDSHAKE = 16384;
 var DEFAULT_TYPES = 'EVENT,REQ,CLOSE,COUNT,AUTH,NEG-OPEN,NEG-MSG,NEG-CLOSE';
 
+// Frames held awaiting inspection, and fragments per message. The
+// message-size cap alone does not bound these: zero-length frames and
+// control frames carry no payload, so a client could otherwise pin a
+// fragmented message open and pile up buffers indefinitely. Both
+// limits are far above anything a real client produces.
+var MAX_PENDING_FRAMES = 256;
+var MAX_FRAGMENTS = 64;
+
+// All knobs come from the port-keyed policy string (see
+// core/njs/shield_core.js): per-server js_var values are global by
+// name in nginx and would leak between profiles.
 function readCfg(s) {
-    var v = s.variables;
+    var p = core.policy(s);
     return {
-        service: v.shield_service || 'unknown',
-        banFile: v.shield_ban_file || '',
-        banRecheck: num(v.shield_ban_recheck, 10),
-        maxMsg: num(v.shield_ws_max_msg, 131072),
-        maxSubs: num(v.shield_ws_max_subs, 20),
-        maxFilters: num(v.shield_ws_max_filters, 10),
-        maxFilterItems: num(v.shield_ws_max_filter_items, 500),
-        bMsg: bucket(num(v.shield_ws_msg_rate, 20), num(v.shield_ws_msg_burst, 100)),
-        bEvent: bucket(num(v.shield_ws_event_rate, 5), num(v.shield_ws_event_burst, 50)),
-        bReq: bucket(num(v.shield_ws_req_rate, 5), num(v.shield_ws_req_burst, 20)),
-        types: keyset(v.shield_nostr_types, DEFAULT_TYPES),
-        kindDeny: keyset(v.shield_nostr_kind_deny, '')
+        service: p.service || 'unknown',
+        banFile: p.ban_file || '',
+        banRecheck: num(p.ban_recheck, 10),
+        maxMsg: num(p.ws_max_msg, 131072),
+        maxSubs: num(p.ws_max_subs, 20),
+        maxFilters: num(p.ws_max_filters, 10),
+        maxFilterItems: num(p.ws_max_filter_items, 500),
+        bMsg: bucket(num(p.ws_msg_rate, 20), num(p.ws_msg_burst, 100)),
+        bEvent: bucket(num(p.ws_event_rate, 5), num(p.ws_event_burst, 50)),
+        bReq: bucket(num(p.ws_req_rate, 5), num(p.ws_req_burst, 20)),
+        types: keyset(p.nostr_types, DEFAULT_TYPES),
+        kindDeny: keyset(p.nostr_kind_deny, '')
     };
 }
 
@@ -76,6 +92,36 @@ function takeToken(b) {
     }
     b.tokens -= 1;
     return true;
+}
+
+// Index just past the blank line that ends an HTTP header block, or -1
+// if it has not arrived yet. Both CRLF and bare-LF terminators are
+// recognised — not to accept them, but so a bare-LF request is
+// detected here instead of being forwarded uninspected while this
+// sniffer waits forever for a CRLF pair that never comes.
+function headerBlockEnd(buf) {
+    for (var i = 0; i + 1 < buf.length; i++) {
+        if (buf[i] !== 0x0a) {
+            continue;
+        }
+        if (buf[i + 1] === 0x0a) {
+            return i + 2;
+        }
+        if (buf[i + 1] === 0x0d && i + 2 < buf.length && buf[i + 2] === 0x0a) {
+            return i + 3;
+        }
+    }
+    return -1;
+}
+
+// True if the first `upto` bytes contain an LF not preceded by CR.
+function hasBareLf(buf, upto) {
+    for (var i = 0; i < upto; i++) {
+        if (buf[i] === 0x0a && (i === 0 || buf[i - 1] !== 0x0d)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Frame encoder for the injected NOTICE/Close frames. Client->server
@@ -199,7 +245,9 @@ function inspect(s, cfg, st, buf) {
     } else if (t === 'CLOSE') {
         if (typeof msg[1] === 'string' && msg[1] in st.subs) {
             delete st.subs[msg[1]];
-            st.subCount--;
+            if (st.subCount > 0) {
+                st.subCount--;
+            }
         }
     }
     // AUTH and NEG-* pass under the overall message-rate bucket.
@@ -276,6 +324,10 @@ function pump(s, cfg, st) {
         }
         st.acc = acc.slice(end);
         st.pending.push(raw);
+        if (st.pending.length > MAX_PENDING_FRAMES) {
+            return violate(s, cfg, st, 'frame-flood',
+                           'pending=' + st.pending.length);
+        }
         if (control) {
             // Close/ping/pong forward as-is once no data message is
             // partially held in front of them.
@@ -284,6 +336,10 @@ function pump(s, cfg, st) {
             }
         } else {
             st.msgParts.push(payload);
+            if (st.msgParts.length > MAX_FRAGMENTS) {
+                return violate(s, cfg, st, 'frame-flood',
+                               'fragments=' + st.msgParts.length);
+            }
             st.msgLen += len;
             st.inMsg = !fin;
             if (fin) {
@@ -324,28 +380,40 @@ function onData(s, cfg, st, data, flags) {
             if (st.hs.length > MAX_HANDSHAKE) {
                 return violate(s, cfg, st, 'oversized-handshake');
             }
-            var idx = st.hs.indexOf('\r\n\r\n');
-            if (idx < 0) {
-                s.send(data);
-                st.hsForwarded += data.length;
+            // Nothing is forwarded until the whole header block has
+            // been seen and validated: forwarding a partial handshake
+            // would let the http stage act on bytes this sniffer has
+            // not classified yet.
+            var end = headerBlockEnd(st.hs);
+            if (end < 0) {
+                return;
+            }
+            // A bare LF is a hard failure rather than something to
+            // parse around. nginx accepts LF as a line terminator, so
+            // tolerating it here means this sniffer and the http stage
+            // can disagree about where headers end and whether the
+            // request is an upgrade — which is a complete inspection
+            // bypass, not a cosmetic difference. Conforming clients
+            // always send CRLF.
+            if (hasBareLf(st.hs, end)) {
+                return violate(s, cfg, st, 'protocol', 'bare-lf-in-handshake');
+            }
+            var head = st.hs.slice(0, end).toString();
+            var rest = st.hs.slice(end);
+            st.hs = Buffer.from('');
+            s.send(Buffer.from(head));
+            if (/\r\nupgrade:[ \t]*websocket/i.test(head)) {
+                st.mode = 'ws';
+                st.acc = Buffer.from(rest);
+                pump(s, cfg, st);
             } else {
-                var end = idx + 4;
-                var head = st.hs.slice(0, end).toString();
-                // Forward the remainder of the headers; anything after
-                // them in this chunk is frame data and goes through
-                // inspection first.
-                s.send(st.hs.slice(st.hsForwarded, end));
-                if (/\r\nupgrade:[ \t]*websocket/i.test(head)) {
-                    st.mode = 'ws';
-                    st.acc = Buffer.from(st.hs.slice(end));
-                    st.hs = Buffer.from('');
-                    pump(s, cfg, st);
-                } else {
-                    // Not a WebSocket. Pass through; the http stage
-                    // closes the connection after one response.
-                    st.mode = 'plain';
-                    s.send(st.hs.slice(end));
-                    st.hs = Buffer.from('');
+                // Not a WebSocket. Pass through; the http stage closes
+                // the connection after one response, and the downstream
+                // watcher below kills the session if the upstream
+                // nonetheless answers 101.
+                st.mode = 'plain';
+                if (rest.length > 0) {
+                    s.send(Buffer.from(rest));
                 }
             }
         }
@@ -365,15 +433,18 @@ function filter(s) {
     var st = {
         mode: 'handshake',
         hs: Buffer.from(''),
-        hsForwarded: 0,
         acc: Buffer.from(''),
         pending: [],
         msgParts: [],
         msgLen: 0,
         inMsg: false,
-        subs: {},
+        // Object.create(null): a plain {} inherits keys like
+        // "toString", so `sid in st.subs` would be true for a
+        // subscription the client never opened.
+        subs: Object.create(null),
         subCount: 0,
         banCheckAt: Date.now() + cfg.banRecheck * 1000,
+        checkedResponse: false,
         killed: false
     };
     s.on('upstream', function (data, flags) {
@@ -381,6 +452,23 @@ function filter(s) {
             onData(s, cfg, st, data, flags);
         } catch (e) {
             // Fail closed: an engine bug must not become a bypass.
+            violate(s, cfg, st, 'engine-error', String(e));
+        }
+    });
+    // Backstop against this sniffer and nginx's HTTP parser ever
+    // disagreeing again: a session classified as non-WebSocket must
+    // never see a 101 response. If it does, an upgrade was negotiated
+    // that nothing inspected, so kill it rather than tunnel it.
+    s.on('downstream', function (data, flags) {
+        try {
+            if (st.mode === 'plain' && !st.checkedResponse && data.length > 0) {
+                st.checkedResponse = true;
+                if (/^HTTP\/1\.[01] 101/.test(data.slice(0, 16).toString())) {
+                    return violate(s, cfg, st, 'protocol', 'unclassified-upgrade');
+                }
+            }
+            s.send(data, flags);
+        } catch (e) {
             violate(s, cfg, st, 'engine-error', String(e));
         }
     });

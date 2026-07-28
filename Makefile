@@ -41,7 +41,7 @@ lint: ## shellcheck + rustfmt + clippy
 validate: ## static: render every profile, nginx -t, fail2ban -t
 	test/validate.sh
 
-.PHONY: test-ws test-ban test-tcp test-http test-guard
+.PHONY: test-ws test-ban test-tcp test-http test-guard test-filters
 test-ws: ## behavioral: WebSocket message policy
 	test/ws_smoke.sh
 test-ban: ## behavioral: detection -> enforcement loop
@@ -52,9 +52,11 @@ test-http: ## behavioral: generic HTTP profile
 	test/http_smoke.sh
 test-guard: ## behavioral: eBPF guard (privileged, Linux)
 	test/guard_smoke.sh
+test-filters: ## detection: fail2ban filters match real log lines
+	test/filters_test.sh
 
 .PHONY: test
-test: validate test-ws test-ban test-tcp test-http test-guard ## run the full suite
+test: validate test-filters test-ws test-ban test-tcp test-http test-guard ## run the full suite
 
 .PHONY: install
 install: ## host mode: render configs, install detection + guard (needs root)

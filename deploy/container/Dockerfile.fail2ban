@@ -11,7 +11,7 @@ RUN apk add --no-cache fail2ban bash gettext \
     && rm -f /etc/fail2ban/jail.d/alpine-ssh.conf
 
 COPY core/fail2ban/filter.d/ /etc/fail2ban/filter.d/
-COPY core/fail2ban/action.d/ /etc/fail2ban/action.d/
+COPY core/fail2ban/action.d/fips-shield.conf.template /etc/fail2ban/fips-shield-action.conf.template
 COPY core/fail2ban/jail.d/fips-shield.local.template /etc/fail2ban/
 COPY core/actions/shield-ban /usr/local/bin/shield-ban
 COPY deploy/container/f2b-entrypoint.sh /f2b-entrypoint.sh

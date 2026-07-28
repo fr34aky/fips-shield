@@ -29,7 +29,11 @@ function num(v, dflt) {
 
 function keyset(v, dflt) {
     var raw = (v === undefined || v === '') ? dflt : v;
-    var out = {};
+    // Object.create(null), not {}: these sets are indexed by
+    // client-supplied strings, and a plain object would answer
+    // truthily for inherited names like "constructor" or "toString",
+    // admitting message types and kinds that were never configured.
+    var out = Object.create(null);
     if (raw === '') {
         return out;
     }
@@ -122,13 +126,45 @@ function connRateExceeded(s, cfg) {
     return n > cfg.connRate;
 }
 
+// Per-profile policy, read from a single js_var named after the
+// listening port.
+//
+// nginx variables are global by name: two profiles each declaring
+// `js_var $shield_conn_rate` share ONE value, and whichever file nginx
+// parsed last wins for every server. That silently disabled the other
+// profiles' limits. A port suffix makes the name unique by
+// construction, since two servers cannot listen on the same port
+// anyway.
+//
+// Format: semicolon-separated key=value pairs. Values may contain
+// commas (message-type lists) but never semicolons.
+function policy(s) {
+    var out = {};
+    var raw = '';
+    try {
+        raw = s.variables['shield_cfg_' + s.variables.server_port] || '';
+    } catch (e) {
+        // No policy declared for this listener: everything falls back
+        // to the defaults below, which are the safe values.
+        return out;
+    }
+    var parts = raw.split(';');
+    for (var i = 0; i < parts.length; i++) {
+        var eq = parts[i].indexOf('=');
+        if (eq > 0) {
+            out[parts[i].slice(0, eq).trim()] = parts[i].slice(eq + 1);
+        }
+    }
+    return out;
+}
+
 function accessCfg(s) {
-    var v = s.variables;
+    var p = policy(s);
     return {
-        service: v.shield_service || 'unknown',
-        banFile: v.shield_ban_file || '',
-        connRate: num(v.shield_conn_rate, 0),
-        connWindow: num(v.shield_conn_window, 60)
+        service: p.service || 'unknown',
+        banFile: p.ban_file || '',
+        connRate: num(p.conn_rate, 0),
+        connWindow: num(p.conn_window, 60)
     };
 }
 
@@ -137,6 +173,13 @@ function accessCfg(s) {
 // not feed back into detection.
 function access(s) {
     var cfg = accessCfg(s);
+    try {
+        // The session log reads this; it comes from the policy rather
+        // than a per-server js_var so it cannot leak between profiles.
+        s.variables.shield_service = cfg.service;
+    } catch (e) {
+        // js_var not declared in this build of the config.
+    }
     if (cfg.banFile && isBanned(s.remoteAddress, cfg.banFile)) {
         verdict(s, cfg.service, 'ban', 'banned', 'rejected-at-accept');
         s.deny();
@@ -150,4 +193,4 @@ function access(s) {
     s.allow();
 }
 
-export default { access, isBanned, verdict, num, keyset };
+export default { access, isBanned, verdict, num, keyset, policy };

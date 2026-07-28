@@ -13,17 +13,36 @@
 [Unit]
 Description=fips-shield eBPF guard (per-node drop/throttle on the mesh interface)
 Documentation=https://github.com/fr34aky/fips-shield
-# The interface must exist before the filter can attach.
 After=fips.service network-pre.target
 Wants=fips.service
+# PartOf is load-bearing, not tidiness: recreating the interface (which
+# a fips daemon restart does) destroys the tc filter along with it. A
+# oneshot unit would never re-run, so the guard would silently stop
+# enforcing while the CLI still reported bans as active. PartOf makes
+# systemd restart this unit whenever fips.service restarts.
+PartOf=fips.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=-/etc/default/fips-guard
 ExecStartPre=/bin/sh -c 'mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf'
+# fips.service is Type=simple, so systemd considers it started before
+# the daemon has created the TUN device. Wait for the interface rather
+# than racing it into a permanent failed state at boot.
+ExecStartPre=/bin/sh -c 'iface=$${SHIELD_GUARD_IFACE:-fips0}; \
+    for i in $$(seq 1 60); do \
+        [ -e "/sys/class/net/$$iface" ] && exit 0; \
+        sleep 1; \
+    done; \
+    echo "interface $$iface did not appear within 60s" >&2; exit 1'
 ExecStart=/usr/local/bin/fips-guard load
+# No --purge: a restart must not discard active bans.
 ExecStop=/usr/local/bin/fips-guard unload
+# The interface can also disappear without fips.service restarting
+# (manual teardown, driver reload); retry rather than stay failed.
+Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target

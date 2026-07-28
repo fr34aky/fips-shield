@@ -35,6 +35,20 @@ sudo deploy/host/render.sh shield.env
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+It also provisions `SHIELD_SOCKET_DIR` (default `/run/fips-shield`),
+the private directory holding the sockets that join each profile's
+stream stage to its http stage. That directory must be mode 0700 and
+owned by the nginx worker user — nginx makes unix listen sockets
+world-connectable, so those permissions are what stop another local
+process from connecting and spoofing a client address past the shield.
+`/run` is a tmpfs on most systems, so install the tmpfiles snippet to
+recreate it at boot:
+
+```sh
+sudo install -m 644 deploy/host/fips-shield-tmpfiles.conf \
+    /etc/tmpfiles.d/fips-shield.conf
+```
+
 `render.sh` renders every template into `/etc/nginx/conf.d/` (http
 stage as `*.conf`, stream stage as `*.stream`) and installs the njs
 engine to `/etc/nginx/njs/shield_ws.js`. Pass a second/third argument

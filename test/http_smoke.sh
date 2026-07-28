@@ -58,7 +58,7 @@ sleep 1
 
 # Rejections must be visible to the detection engine in the access log
 # the jails already glob (429 rate limited, 405 method, 444 path).
-for code in 429 405 444; do
+for code in 429 403 444; do
     if ! grep -q "\"status\":$code," "$WORK_DIR/logs/shield-web.access.log"; then
         echo "error: no $code line in the access log for the jails to match" >&2
         tail -5 "$WORK_DIR/logs/shield-web.access.log" >&2 || true

@@ -26,8 +26,17 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$ENV_FILE"
 
 install -m 644 "$REPO_ROOT"/core/fail2ban/filter.d/*.conf "$F2B_DIR/filter.d/"
-install -m 644 "$REPO_ROOT"/core/fail2ban/action.d/*.conf "$F2B_DIR/action.d/"
 install -m 755 "$REPO_ROOT"/core/actions/shield-ban /usr/local/bin/shield-ban
+
+envsubst '${SHIELD_BAN_FILE}' \
+    < "$REPO_ROOT"/core/fail2ban/action.d/fips-shield.conf.template \
+    > "$F2B_DIR/action.d/fips-shield.conf"
+
+# The jails refuse to start when a logpath glob matches nothing, and
+# nginx creates its logs on its own schedule — seed one so a fresh host
+# can load the configuration before the first request arrives.
+mkdir -p /var/log/nginx
+touch /var/log/nginx/shield-init.access.log /var/log/nginx/shield-error.log
 
 envsubst '${SHIELD_F2B_FINDTIME} ${SHIELD_F2B_BANTIME} ${SHIELD_F2B_IGNOREIP}
           ${SHIELD_F2B_IGNORESELF} ${SHIELD_F2B_HANDSHAKE_MAXRETRY}
