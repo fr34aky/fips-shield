@@ -68,4 +68,10 @@ Backends:
   (`js_access`) and live sessions are cut within
   `SHIELD_BAN_RECHECK` seconds. Readers honor `until` themselves, so
   a stale file cannot outlive its expiries.
-- **eBPF guard** (Phase 4): same CLI, enforced in-kernel on fips0.
+- **eBPF guard** (Phase 4, `guard/`): same CLI, enforced in-kernel by a
+  tc classifier on fips0 — covers every listener on the mesh
+  interface, drops before any socket work, and adds per-source packet
+  throttling. Bans live in pinned BPF maps with in-kernel expiry;
+  `guard/shield-ban` is the wrapper fail2ban calls. Installing it
+  replaces the file backend without touching the jails
+  (`SHIELD_BAN_ALSO_FILE=true` runs both).

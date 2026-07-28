@@ -24,21 +24,33 @@ misbehavior; that gap is what fips-shield fills.
 mesh peers ──▶ fips0 (TUN, owned by the fips daemon)
                  │
                  ▼
-  [eBPF tc ingress]                Phase 4 — kernel drop/throttle maps
+  [eBPF tc ingress]                kernel drop/throttle per node
                  │
                  ▼
-  [nginx stream stage + njs]       Phase 2 — WS frame inspection
+  [nginx stream stage + njs]       WebSocket message inspection
                  │
                  ▼
-  [nginx http stage]               Phase 1 — handshake limits, filtering
+  [nginx http stage]               handshake limits, request filtering
                  │
                  ▼
   protected service (loopback)     e.g. strfry on 127.0.0.1:7777
 
   fail2ban (detection) ◀── JSON logs + shield-verdict lines
         └── shield-ban ──▶ banlist file ──▶ nginx (reject/cut)
-                └── Phase 4: same CLI ──▶ eBPF maps
+                       └──▶ eBPF maps  ──▶ kernel (drop)
 ```
+
+### Where this sits
+
+Everything above runs on `fips0`, which the fips daemon feeds *after*
+transport reception and Noise decryption. That is the right place for
+application-level abuse — the mesh's transport crypto authenticates a
+peer but says nothing about how it behaves — but it has a ceiling: a
+banned node's packets are still decrypted before they are dropped, and
+its peer link, routing role, and transit forwarding are untouched.
+fips-shield protects the services on this host; it is not a mesh-level
+control. Pushing enforcement below the TUN (per-source refusal in the
+daemon, driven by the same ban list) is future work.
 
 Three modular seams keep it extensible beyond HTTP and beyond today's
 mechanisms:
@@ -63,6 +75,8 @@ core/njs/          shield_ws.js — WebSocket/Nostr inspection engine +
                    banlist enforcement (njs)
 core/fail2ban/     jails, filters, banaction for the detection engine
 core/actions/      shield-ban — enforcement backend CLI (frozen contract)
+guard/             fips-guard — eBPF enforcement backend (Rust/aya + a
+                   tc classifier in C), same CLI, kernel-level drops
 profiles/strfry/   strfry relay profile: http vhost + stream stage
                    templates, operator notes
 deploy/container/  Dockerfiles (shield, fail2ban sidecar) + compose
@@ -125,9 +139,10 @@ input in Phase 3.
 ## Validation
 
 ```sh
-test/validate.sh    # static: render, build images, nginx -t, fail2ban -t
-test/ws_smoke.sh    # behavioral: WS clients vs. the message policy
-test/ban_smoke.sh   # behavioral: detection -> enforcement loop
+test/validate.sh     # static: render, build images, nginx -t, fail2ban -t
+test/ws_smoke.sh     # behavioral: WS clients vs. the message policy
+test/ban_smoke.sh    # behavioral: detection -> enforcement loop
+test/guard_smoke.sh  # behavioral: eBPF drops/throttle (privileged, Linux)
 ```
 
 `ws_smoke.sh` runs a mock relay upstream plus raw-socket WebSocket
@@ -152,10 +167,23 @@ service automatically. Manual control uses the same tool:
 shield-ban ban fd97::x 3600 | unban fd97::x | check fd97::x | list
 ```
 
+Two enforcement backends implement that CLI, and the jails are
+identical for both:
+
+- **banlist file** (default, portable) — nginx rejects banned nodes at
+  connection accept and cuts their live sessions. Protects the
+  shield-fronted service.
+- **eBPF guard** (Linux, `guard/`) — a tc classifier on `fips0` drops
+  banned nodes' packets in the kernel and can throttle a source by
+  packet rate. Protects *every* listener on the mesh interface at no
+  per-packet cost. Install per [guard/README.md](guard/README.md) and
+  the same fail2ban jails enforce in-kernel.
+
 ## Status / roadmap
 
 Phase 1 — HTTP-level hardening and per-node rate limiting. ✅
 Phase 2 — WebSocket message-aware filtering (njs stream stage). ✅
 Phase 3 — Detection & response: fail2ban → shield-ban → nginx. ✅
-See [docs/plan.md](docs/plan.md) for what's next: eBPF enforcement
-(4), second profile + CI (5).
+Phase 4 — eBPF guard: kernel-level drops and per-source throttle. ✅
+See [docs/plan.md](docs/plan.md) for what's next: second profile,
+packaging + CI (5).

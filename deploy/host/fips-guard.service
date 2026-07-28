@@ -1,0 +1,29 @@
+# Loads the fips-shield eBPF guard at boot, before the services it
+# protects. Oneshot: fips-guard attaches the tc filter, pins its maps,
+# and exits — the filter and maps outlive it.
+#
+#   install -m 644 fips-guard.service /etc/systemd/system/
+#   systemctl enable --now fips-guard
+#
+# Tune the interface and throttle via /etc/default/fips-guard:
+#   SHIELD_GUARD_IFACE=fips0
+#   SHIELD_GUARD_RATE_PPS=2000
+#   SHIELD_GUARD_BURST_PKTS=4000
+
+[Unit]
+Description=fips-shield eBPF guard (per-node drop/throttle on the mesh interface)
+Documentation=https://github.com/fr34aky/fips-shield
+# The interface must exist before the filter can attach.
+After=fips.service network-pre.target
+Wants=fips.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/fips-guard
+ExecStartPre=/bin/sh -c 'mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf'
+ExecStart=/usr/local/bin/fips-guard load
+ExecStop=/usr/local/bin/fips-guard unload
+
+[Install]
+WantedBy=multi-user.target

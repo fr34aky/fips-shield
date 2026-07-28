@@ -1,0 +1,9 @@
+# Test environment for the eBPF guard: needs the host kernel (shared),
+# iproute2 for veth/netns plumbing, and python3 for TUN injection.
+# Ubuntu 24.04 to match the glibc the host-built binary links against.
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        iproute2 iputils-ping python3 \
+    && rm -rf /var/lib/apt/lists/*

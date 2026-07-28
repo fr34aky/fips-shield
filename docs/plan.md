@@ -84,17 +84,37 @@ limits, detections, and bans key on the source /128.
   unban restore, established-session cut, and the full automatic loop
   (2 violations → fail2ban → banlist → rejected).
 
-## Phase 4 — eBPF enforcement (`guard/`)
+## Phase 4 — eBPF enforcement (`guard/`) ✅
 
-- Rust/aya workspace in this repo: tc clsact ingress program on fips0
-  (tc rather than XDP — TUN only does generic XDP; tc is predictable
-  there).
-- Maps: banned-/128 hash with TTL; per-source token-bucket throttle.
-- `guardctl ban|unban|throttle|list` over a unix socket; a fail2ban
-  action calls it. Bans drop in-kernel before the socket exists.
-- Drop counters exported Prometheus-style.
-- No-compiled-code fallback: nftables sets driven by the same action
-  script (no per-source throttling, zero code to own).
+- `guard/`: a tc clsact ingress classifier in C (clang -target bpf,
+  compiled by build.rs and embedded) loaded by a stable-Rust aya CLI —
+  no nightly, no bpf-linker, no libbpf headers. tc rather than XDP
+  because fips0 is a TUN (generic XDP only).
+- Maps: `shield_bans` (/128 → monotonic + wall-clock expiry),
+  `shield_throttle` (LRU token buckets), `shield_config`,
+  `shield_stats` (per-CPU counters).
+- Deviation from the sketch: **no daemon and no unix socket**. Maps are
+  pinned to bpffs and the tc filter owns the program, so the CLI is
+  fire-and-forget and both survive its exit. Attachment is a classic
+  netlink filter, not TCX — a TCX link dies with the process that
+  created it.
+- Ban expiry is enforced in-kernel against the monotonic clock, so a
+  lapsed ban stops dropping with no sweeper; `list`/`check` prune
+  stale entries opportunistically.
+- Implements the frozen `shield-ban` CLI (`guard/shield-ban` wrapper),
+  so the Phase 3 jails switch to kernel enforcement unchanged;
+  `SHIELD_BAN_ALSO_FILE=true` keeps the file backend in sync.
+- Packet parsing handles both L3 (TUN — what fips0 delivers) and L2
+  devices; `fips-guard stats` reports counters and configuration.
+- Covered by `test/guard_smoke.sh` (privileged container, host
+  kernel): veth end-to-end drop/unban/reload-persistence plus a TUN
+  device exercising the production L3 path, in-kernel expiry, and
+  per-source throttling.
+
+Scope, deliberately: this filters on fips0, i.e. after the daemon has
+decrypted the traffic. It protects every service on the host but does
+not reduce decrypt cost or touch peering/routing — see "Where this
+sits" in README.md.
 
 ## Phase 5 — Modularization proof, packaging, CI
 

@@ -39,3 +39,25 @@ sudo nginx -t && sudo systemctl reload nginx
 stage as `*.conf`, stream stage as `*.stream`) and installs the njs
 engine to `/etc/nginx/njs/shield_ws.js`. Pass a second/third argument
 to override the output and njs directories.
+
+## Detection engine
+
+```sh
+sudo deploy/host/install-fail2ban.sh shield.env
+sudo fail2ban-client -t && sudo systemctl reload fail2ban
+```
+
+## eBPF guard (optional, Linux only)
+
+Kernel-level enforcement instead of nginx-level: bans cover every
+listener on `fips0` and cost nothing per packet. Build and install
+per [../../guard/README.md](../../guard/README.md), then:
+
+```sh
+sudo install -m 644 deploy/host/fips-guard.service /etc/systemd/system/
+printf 'SHIELD_GUARD_IFACE=fips0\n' | sudo tee /etc/default/fips-guard
+sudo systemctl enable --now fips-guard
+```
+
+With `/usr/local/bin/shield-ban` pointing at the guard wrapper, the
+existing fail2ban jails enforce in the kernel with no other changes.

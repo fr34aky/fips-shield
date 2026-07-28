@@ -1,0 +1,15 @@
+[package]
+name = "fips-guard"
+version = "0.1.0"
+edition = "2021"
+description = "eBPF enforcement backend for fips-shield: per-node drop and throttle on the mesh interface"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+aya = "0.14"
+clap = { version = "4", features = ["derive", "env"] }
+libc = "0.2"
+
+[profile.release]
+strip = true

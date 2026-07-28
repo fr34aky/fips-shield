@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# fips-shield enforcement backend: eBPF edition.
+#
+# Implements the shield-ban CLI (docs/verdict-schema.md) on top of
+# fips-guard, so fail2ban's fips-shield action drives kernel-level
+# drops instead of the banlist file. Install this as
+# /usr/local/bin/shield-ban to swap backends; the jails do not change.
+#
+# With SHIELD_BAN_ALSO_FILE=true it additionally maintains the Phase 3
+# banlist file, keeping nginx's own view in sync. That is redundant for
+# enforcement (the kernel already dropped the packets) but useful if
+# you want the shield's logs and `shield-ban list` to agree across both
+# layers, or a fallback while the guard is unloaded.
+set -euo pipefail
+
+GUARD="${SHIELD_GUARD_BIN:-/usr/local/bin/fips-guard}"
+FILE_BACKEND="${SHIELD_FILE_BACKEND:-/usr/local/lib/fips-shield/shield-ban-file}"
+
+if [ "${SHIELD_BAN_ALSO_FILE:-false}" = "true" ] && [ -x "$FILE_BACKEND" ]; then
+    # Never let the secondary backend fail the primary one.
+    "$FILE_BACKEND" "$@" >/dev/null 2>&1 || true
+fi
+
+exec "$GUARD" "$@"

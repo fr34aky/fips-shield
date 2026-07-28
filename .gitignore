@@ -1,2 +1,3 @@
 shield.env
 deploy/container/shield.env
+guard/target/
