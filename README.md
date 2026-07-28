@@ -7,8 +7,13 @@ floods inside established connections. nginx is the enforcement proxy,
 fail2ban the detection engine, and eBPF the kernel-level ban layer.
 
 Ships with two profiles: **strfry** (Nostr relays, with WebSocket
-message-aware filtering) and **tcp** (any plain TCP service). Adding
-another service is usually one template file.
+message-aware filtering) and **tcp** (any plain TCP service — SSH,
+databases, APIs). Adding another service is usually one template file.
+
+> **📖 New here? Read the [user guide](docs/guide.md).** It covers
+> installation, configuration, and operation from scratch. To protect
+> something other than a Nostr relay, go straight to
+> [protecting your own service](docs/protecting-your-service.md).
 
 ## Threat model
 
@@ -93,9 +98,9 @@ test/              validate.sh (static), ws_smoke.sh (WS policy),
                    ban_smoke.sh (detection→enforcement loop),
                    tcp_smoke.sh (generic profile), guard_smoke.sh (eBPF)
 Makefile           build / test / install targets (make help)
-docs/plan.md       full implementation plan and phase status
-docs/verdict-schema.md  frozen verdict schema + backend CLI contract
-docs/writing-a-profile.md  how to protect another service
+docs/               guide.md (start here), protecting-your-service.md
+                    (cookbook), writing-a-profile.md, verdict-schema.md,
+                    plan.md — index in docs/README.md
 shield.env.example all tunables, documented
 ```
 
