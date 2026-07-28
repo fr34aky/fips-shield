@@ -216,4 +216,7 @@ Phase 3 — Detection & response: fail2ban → shield-ban → nginx. ✅
 Phase 4 — eBPF guard: kernel-level drops and per-source throttle. ✅
 Phase 5 — Modular profiles (second profile), Makefile, CI. ✅
 The roadmap in [docs/plan.md](docs/plan.md) is complete; see its
-"Future" section for what could come next.
+"Future" section for what could come next. A full adversarial review
+(July 2026) is written up in
+[docs/review-2026-07.md](docs/review-2026-07.md): all critical and high
+findings are fixed, with the remaining medium/low items listed there.

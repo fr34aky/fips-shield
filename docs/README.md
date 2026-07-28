@@ -32,3 +32,6 @@
 
 - **[Implementation plan](plan.md)** — how the project was built,
   phase by phase, including the design decisions and their trade-offs.
+- **[Code review, July 2026](review-2026-07.md)** — what the review
+  found, what was fixed, the medium/low items still open, and the
+  things verified as correct so they need not be re-litigated.
