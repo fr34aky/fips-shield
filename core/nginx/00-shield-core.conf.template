@@ -1,0 +1,43 @@
+# fips-shield core — shared observability, limit zones, and WebSocket
+# plumbing. http-context; included before every profile vhost (numeric
+# file prefixes fix the include order). Rendered with envsubst: the
+# ${SHIELD_*} placeholders come from shield.env, everything else with a
+# plain $ is a normal nginx variable and passes through untouched.
+
+# One JSON line per request. "limited" is set when limit_req delayed or
+# rejected the request — Phase 3's detection engine keys on this field,
+# so keep it stable.
+log_format shield_json escape=json
+    '{'
+    '"ts":"$time_iso8601",'
+    '"src":"$remote_addr",'
+    '"status":$status,'
+    '"request":"$request",'
+    '"host":"$host",'
+    '"upgrade":"$http_upgrade",'
+    '"bytes_in":$request_length,'
+    '"bytes_out":$bytes_sent,'
+    '"duration":$request_time,'
+    '"conn":$connection,'
+    '"conn_reqs":$connection_requests,'
+    '"limited":"$limit_req_status",'
+    '"ua":"$http_user_agent"'
+    '}';
+
+# Standard WebSocket upgrade pass-through map.
+map $http_upgrade $shield_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# On a FIPS mesh a source address is a /128 derived from the node's key:
+# no NAT aliasing, no spoofing (frames arrive authenticated via fips0).
+# Per-address limits are therefore per-node limits, and a ban is a
+# node-identity ban.
+limit_req_zone  $binary_remote_addr zone=shield_handshake:${SHIELD_HANDSHAKE_ZONE_SIZE} rate=${SHIELD_HANDSHAKE_RATE};
+limit_conn_zone $binary_remote_addr zone=shield_conn:${SHIELD_CONN_ZONE_SIZE};
+
+# 429 tells well-behaved clients to back off; the log line tells the
+# detection engine someone didn't.
+limit_req_status  429;
+limit_conn_status 429;

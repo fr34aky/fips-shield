@@ -1,0 +1,56 @@
+# fips-shield profile: strfry Nostr relay.
+#
+# Binds the host's fips0 mesh address and proxies to a strfry instance
+# that must listen on loopback only (see profiles/strfry/README.md).
+# strfry's entire HTTP surface is GET / — a WebSocket upgrade for the
+# relay protocol, or a NIP-11 info document when requested with
+# "Accept: application/nostr+json". Everything else is dropped.
+
+server {
+    listen [${SHIELD_BIND_ADDR}]:${SHIELD_LISTEN_PORT} default_server;
+    server_name ${SHIELD_SERVER_NAME};
+
+    access_log /var/log/nginx/shield-strfry.access.log shield_json;
+
+    # Slow-client and header abuse containment. Relay traffic carries no
+    # HTTP request bodies; anything with a body larger than a handshake
+    # is not a Nostr client.
+    client_max_body_size 4k;
+    client_header_timeout 10s;
+    client_body_timeout 10s;
+    large_client_header_buffers 2 8k;
+    keepalive_timeout 30s;
+
+    # Concurrent WebSocket connections per mesh node.
+    limit_conn shield_conn ${SHIELD_MAX_CONNS_PER_NODE};
+
+    location = / {
+        # Handshake rate per mesh node. Established WebSockets are not
+        # affected — this prices connection churn, not messages.
+        limit_req zone=shield_handshake burst=${SHIELD_HANDSHAKE_BURST} nodelay;
+
+        if ($request_method != GET) {
+            return 405;
+        }
+
+        proxy_pass http://${SHIELD_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $shield_connection_upgrade;
+        proxy_set_header Host $host;
+        # strfry reads the source address from this header when
+        # relay.realIpHeader is set — keeps its own per-IP accounting
+        # correct behind the proxy.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout ${SHIELD_WS_IDLE_TIMEOUT};
+        proxy_read_timeout ${SHIELD_WS_IDLE_TIMEOUT};
+        proxy_buffering off;
+    }
+
+    # Not part of the relay surface: close without a response (444) so
+    # scanners get nothing to fingerprint.
+    location / {
+        return 444;
+    }
+}

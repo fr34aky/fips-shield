@@ -1,0 +1,34 @@
+# fips-shield in front of a strfry relay, container mode.
+#
+#   cp ../../shield.env.example shield.env   # edit SHIELD_BIND_ADDR etc.
+#   docker compose up -d
+#
+# host networking is required: the shield must bind the fips0 mesh
+# address, which lives on the host (the fips daemon owns the TUN).
+# With host networking the loopback upstream (127.0.0.1:7777) is the
+# host's loopback, so it reaches a strfry running either on the host
+# or in the container below.
+
+services:
+  shield:
+    build:
+      context: ../..
+      dockerfile: deploy/container/Dockerfile
+    network_mode: host
+    env_file: shield.env
+    restart: unless-stopped
+
+  # Optional: run strfry itself as a container. Remove if strfry
+  # already runs on the host. Host networking + explicit loopback bind
+  # keeps it unreachable from the mesh except through the shield.
+  #
+  # strfry:
+  #   image: ghcr.io/hoytech/strfry:latest
+  #   network_mode: host
+  #   volumes:
+  #     - ./strfry.conf:/etc/strfry.conf:ro   # bind = "127.0.0.1", port = 7777
+  #     - strfry-db:/app/strfry-db
+  #   restart: unless-stopped
+  #
+# volumes:
+#   strfry-db:
