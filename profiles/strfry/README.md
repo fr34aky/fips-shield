@@ -81,5 +81,9 @@ to be inspectable. strfry's own `writePolicy` remains useful for
 content-level decisions (spam scoring, pubkey reputation); the shield
 handles the transport- and rate-level abuse in front of it.
 
-Still later phases: automated bans from repeated verdicts (Phase 3
-detection engine, Phase 4 eBPF enforcement).
+Detection & response (Phase 3, fail2ban): repeated violations —
+handshake floods, message-level verdicts, surface probing — ban the
+node via the `shield-ban` backend (see the README's "Automated bans"
+and [../../docs/verdict-schema.md](../../docs/verdict-schema.md));
+banned nodes are rejected at connection accept and live sessions are
+cut. Still later: kernel-level enforcement (Phase 4 eBPF).

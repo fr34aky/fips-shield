@@ -3,11 +3,15 @@
 #   cp ../../shield.env.example shield.env   # edit SHIELD_BIND_ADDR etc.
 #   docker compose up -d
 #
-# host networking is required: the shield must bind the fips0 mesh
-# address, which lives on the host (the fips daemon owns the TUN).
-# With host networking the loopback upstream (127.0.0.1:7777) is the
-# host's loopback, so it reaches a strfry running either on the host
-# or in the container below.
+# shield: host networking is required — it must bind the fips0 mesh
+# address, which lives on the host (the fips daemon owns the TUN). With
+# host networking the loopback upstream (127.0.0.1:7777) is the host's
+# loopback, so it reaches a strfry running either on the host or in the
+# container below.
+#
+# fail2ban: detection sidecar. Tails the shield logs (shared volume),
+# writes bans to the banlist (shared volume) via shield-ban; nginx
+# enforces them. No network, no docker socket.
 
 services:
   shield:
@@ -16,6 +20,20 @@ services:
       dockerfile: deploy/container/Dockerfile
     network_mode: host
     env_file: shield.env
+    volumes:
+      - shield-logs:/var/log/nginx
+      - shield-bans:/var/lib/fips-shield
+    restart: unless-stopped
+
+  fail2ban:
+    build:
+      context: ../..
+      dockerfile: deploy/container/Dockerfile.fail2ban
+    network_mode: none
+    env_file: shield.env
+    volumes:
+      - shield-logs:/var/log/nginx
+      - shield-bans:/var/lib/fips-shield
     restart: unless-stopped
 
   # Optional: run strfry itself as a container. Remove if strfry
@@ -29,6 +47,8 @@ services:
   #     - ./strfry.conf:/etc/strfry.conf:ro   # bind = "127.0.0.1", port = 7777
   #     - strfry-db:/app/strfry-db
   #   restart: unless-stopped
-  #
-# volumes:
-#   strfry-db:
+
+volumes:
+  shield-logs:
+  shield-bans:
+#  strfry-db:

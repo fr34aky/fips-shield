@@ -34,20 +34,23 @@ docker run -d --name "$CONTAINER" --env-file "$WORK_DIR/shield.env" \
     fips-shield:test >/dev/null
 
 if ! docker run --rm --network "container:$CONTAINER" \
-    -v "$REPO_ROOT/test/ws_test.py":/ws_test.py:ro \
-    python:3-alpine python3 /ws_test.py; then
+    -v "$REPO_ROOT/test":/test:ro \
+    python:3-alpine python3 /test/ws_test.py; then
     echo "--- shield logs ---" >&2
     docker logs "$CONTAINER" >&2 || true
+    docker exec "$CONTAINER" cat /var/log/nginx/shield-error.log >&2 || true
     exit 1
 fi
 
 # The engine must have logged a structured verdict for each rule the
-# tests tripped.
+# tests tripped (shield-error.log is the file the detection engine
+# tails).
 for rule in unmasked-client-frame oversized-message kind-denied \
             type-not-allowed event-rate too-many-subs; do
-    if ! docker logs "$CONTAINER" 2>&1 | grep shield-verdict | grep -q "$rule"; then
+    if ! docker exec "$CONTAINER" cat /var/log/nginx/shield-error.log \
+        | grep shield-verdict | grep -q "$rule"; then
         echo "error: no shield-verdict line for rule '$rule'" >&2
-        docker logs "$CONTAINER" >&2 || true
+        docker exec "$CONTAINER" cat /var/log/nginx/shield-error.log >&2 || true
         exit 1
     fi
 done

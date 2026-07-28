@@ -60,16 +60,29 @@ limits, detections, and bans key on the source /128.
   assert per rule that the client is cut and the message never reached
   the upstream (incl. fragmentation reassembly and flood-tail cases).
 
-## Phase 3 — Detection & response engine
+## Phase 3 — Detection & response engine ✅
 
-- fail2ban with custom filters over the Phase 1/2 JSON logs; jails per
-  attack class (handshake flood, REQ flood, EVENT spam, repeated
-  malformed frames) with escalating ban TTLs.
-- Freeze the verdict schema and the action-script contract — this is
-  the plugin interface every later mechanism targets.
-- First enforcement backend: nginx denylist include (deny + reload, or
-  njs shared dict).
-- Container mode: fail2ban sidecar sharing the log volume.
+- fail2ban with three jails over the shield logs: handshake floods
+  (429s in the access log), message-level violations (`shield-verdict`
+  lines in the shield error log), surface probing (444/405). Escalating
+  ban times (`bantime.increment`, doubling, capped at a week).
+- Frozen contracts in `docs/verdict-schema.md`: the verdict JSON line
+  (grep anchor `shield-verdict`, fixed field order) and the
+  `shield-ban ban|unban|check|list` backend CLI. The `banned` rule is
+  excluded from detection filters so enforcement can't feed back into
+  detection.
+- Enforcement backend: banlist file on a shared volume (atomic replace
+  under flock, expired entries pruned on write, expiry honored
+  reader-side). No nginx reloads, no docker socket: the njs engine
+  re-reads the file on mtime change, rejects banned sources at accept
+  (`js_access`) and cuts live sessions within `SHIELD_BAN_RECHECK`
+  seconds.
+- Container mode: fail2ban sidecar (`Dockerfile.fail2ban`,
+  `network_mode: none`) sharing log + banlist volumes; host mode:
+  `deploy/host/install-fail2ban.sh` for native fail2ban.
+- Covered by `test/ban_smoke.sh`: manual ban (reject at accept),
+  unban restore, established-session cut, and the full automatic loop
+  (2 violations → fail2ban → banlist → rejected).
 
 ## Phase 4 — eBPF enforcement (`guard/`)
 

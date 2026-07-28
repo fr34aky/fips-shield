@@ -25,4 +25,11 @@ fi
 docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile -t fips-shield:test "$REPO_ROOT"
 docker run --rm --env-file "$WORK_DIR/shield.env" fips-shield:test nginx -t
 
+# Detection sidecar: render the jails and let fail2ban verify the full
+# configuration (filters, action, jail wiring).
+docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile.fail2ban \
+    -t fips-shield-f2b:test "$REPO_ROOT"
+docker run --rm --env-file "$WORK_DIR/shield.env" fips-shield-f2b:test \
+    fail2ban-client -t
+
 echo "OK"

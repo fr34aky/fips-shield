@@ -1,0 +1,33 @@
+# fips-shield jails. Rendered with envsubst from shield.env (container:
+# sidecar entrypoint; host: deploy/host/install-fail2ban.sh).
+
+[DEFAULT]
+banaction = fips-shield
+backend = polling
+usedns = no
+findtime = ${SHIELD_F2B_FINDTIME}
+bantime = ${SHIELD_F2B_BANTIME}
+# Escalate repeat offenders: double per re-ban, capped at a week.
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 1w
+ignoreip = ${SHIELD_F2B_IGNOREIP}
+ignoreself = ${SHIELD_F2B_IGNORESELF}
+
+[fips-shield-handshake]
+enabled = true
+filter = fips-shield-handshake
+logpath = /var/log/nginx/shield-strfry.access.log
+maxretry = ${SHIELD_F2B_HANDSHAKE_MAXRETRY}
+
+[fips-shield-verdict]
+enabled = true
+filter = fips-shield-verdict
+logpath = /var/log/nginx/shield-error.log
+maxretry = ${SHIELD_F2B_VERDICT_MAXRETRY}
+
+[fips-shield-scan]
+enabled = true
+filter = fips-shield-scan
+logpath = /var/log/nginx/shield-strfry.access.log
+maxretry = ${SHIELD_F2B_SCAN_MAXRETRY}

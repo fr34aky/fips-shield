@@ -31,8 +31,17 @@ server {
     listen [${SHIELD_BIND_ADDR}]:${SHIELD_LISTEN_PORT};
 
     access_log /var/log/nginx/shield-strfry.stream.log shield_stream_json;
+    # shield-verdict lines (s.warn from the engine) land here — this is
+    # the file the detection engine tails.
+    error_log /var/log/nginx/shield-error.log warn;
 
     js_var $shield_service strfry;
+
+    # Ban enforcement: reject banned sources at accept, re-check
+    # established sessions every SHIELD_BAN_RECHECK seconds.
+    js_var $shield_ban_file '${SHIELD_BAN_FILE}';
+    js_var $shield_ban_recheck ${SHIELD_BAN_RECHECK};
+    js_access shield.access;
 
     # Message policy (see shield.env for per-knob documentation).
     js_var $shield_ws_max_msg ${SHIELD_WS_MAX_MSG};

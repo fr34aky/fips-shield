@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# fips-shield enforcement backend: banlist-file edition.
+#
+# This CLI is the frozen contract between detection and enforcement
+# (docs/verdict-schema.md). The detection engine only ever calls these
+# verbs; alternative backends (Phase 4: eBPF guard) implement the same
+# CLI and can be swapped in via fail2ban's banaction.
+#
+#   shield-ban ban <ip> <seconds>   add/extend a ban
+#   shield-ban unban <ip>           remove a ban
+#   shield-ban check <ip>           exit 0 + print expiry if banned,
+#                                   exit 1 if not
+#   shield-ban list                 print active bans (ip, expiry)
+#
+# Banlist format: one "<ip> <until-epoch-seconds>" per line, replaced
+# atomically (tmp + mv) under an exclusive flock. Expired entries are
+# pruned on every write. nginx re-reads the file on mtime change; entry
+# expiry is also honored reader-side, so a stale file cannot extend a
+# ban past its "until".
+#
+# IPs must be written the way nginx prints $remote_addr (lowercase,
+# compressed IPv6) — fail2ban's normalized form matches for the
+# fd97::/16 mesh addresses this is used with.
+set -euo pipefail
+
+BAN_FILE="${SHIELD_BAN_FILE:-/var/lib/fips-shield/banlist}"
+LOCK_FILE="$BAN_FILE.lock"
+
+usage() {
+    echo "usage: shield-ban ban <ip> <seconds> | unban <ip> | check <ip> | list" >&2
+    exit 2
+}
+
+active_entries() {
+    # Prints unexpired entries; missing file is an empty list.
+    [ -f "$BAN_FILE" ] || return 0
+    awk -v now="$(date +%s)" 'NF >= 2 && $2 > now' "$BAN_FILE"
+}
+
+rewrite() {
+    # stdin: the new full banlist. Atomic replace, world-readable so
+    # the nginx workers can read it.
+    local tmp
+    tmp="$(mktemp "$BAN_FILE.XXXXXX")"
+    cat > "$tmp"
+    chmod 644 "$tmp"
+    mv "$tmp" "$BAN_FILE"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+ban)
+    ip="${2:?usage: shield-ban ban <ip> <seconds>}"
+    ttl="${3:?usage: shield-ban ban <ip> <seconds>}"
+    until=$(( $(date +%s) + ttl ))
+    mkdir -p "$(dirname "$BAN_FILE")"
+    exec 9> "$LOCK_FILE"
+    flock -x 9
+    { active_entries | awk -v ip="$ip" '$1 != ip'; echo "$ip $until"; } | rewrite
+    echo "banned $ip until $until"
+    ;;
+unban)
+    ip="${2:?usage: shield-ban unban <ip>}"
+    mkdir -p "$(dirname "$BAN_FILE")"
+    exec 9> "$LOCK_FILE"
+    flock -x 9
+    active_entries | awk -v ip="$ip" '$1 != ip' | rewrite
+    echo "unbanned $ip"
+    ;;
+check)
+    ip="${2:?usage: shield-ban check <ip>}"
+    until="$(active_entries | awk -v ip="$ip" '$1 == ip {print $2}')"
+    if [ -n "$until" ]; then
+        echo "banned $ip until $until"
+        exit 0
+    fi
+    echo "not banned $ip"
+    exit 1
+    ;;
+list)
+    active_entries
+    ;;
+*)
+    usage
+    ;;
+esac

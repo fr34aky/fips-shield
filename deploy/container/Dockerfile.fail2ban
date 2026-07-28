@@ -1,0 +1,21 @@
+# fips-shield detection sidecar: fail2ban tailing the shield logs on a
+# shared volume, banning via the shield-ban backend onto the shared
+# banlist volume. Needs no network and no docker socket.
+#
+# Build from the repository root:
+#   docker build -f deploy/container/Dockerfile.fail2ban -t fips-shield-f2b .
+
+FROM alpine:3.22
+
+RUN apk add --no-cache fail2ban bash gettext \
+    && rm -f /etc/fail2ban/jail.d/alpine-ssh.conf
+
+COPY core/fail2ban/filter.d/ /etc/fail2ban/filter.d/
+COPY core/fail2ban/action.d/ /etc/fail2ban/action.d/
+COPY core/fail2ban/jail.d/fips-shield.local.template /etc/fail2ban/
+COPY core/actions/shield-ban /usr/local/bin/shield-ban
+COPY deploy/container/f2b-entrypoint.sh /f2b-entrypoint.sh
+RUN chmod +x /usr/local/bin/shield-ban /f2b-entrypoint.sh
+
+ENTRYPOINT ["/f2b-entrypoint.sh"]
+CMD ["fail2ban-server", "-xf", "start"]
