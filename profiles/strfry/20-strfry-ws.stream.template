@@ -1,0 +1,58 @@
+# fips-shield profile: strfry — stream stage (WebSocket inspection).
+#
+# Owns the fips0-facing listener since Phase 2. Client bytes run
+# through the njs engine (core/njs/shield_ws.js), which enforces the
+# Nostr message policy below before anything reaches the http stage;
+# the http stage (10-strfry.conf) now listens on loopback behind this,
+# receiving the real client address via the PROXY protocol.
+#
+# Included into the stream{} context (files matching *.stream).
+
+js_path "/etc/nginx/njs/";
+js_import shield from shield_ws.js;
+
+js_var $shield_verdict '';
+
+# One line per session; "verdict" is non-empty when the engine closed
+# the session (last rule that fired). Phase 3 consumes this alongside
+# the per-verdict lines the engine writes to the error log.
+log_format shield_stream_json escape=json
+    '{'
+    '"ts":"$time_iso8601",'
+    '"src":"$remote_addr",'
+    '"status":$status,'
+    '"bytes_in":$bytes_received,'
+    '"bytes_out":$bytes_sent,'
+    '"duration":$session_time,'
+    '"verdict":"$shield_verdict"'
+    '}';
+
+server {
+    listen [${SHIELD_BIND_ADDR}]:${SHIELD_LISTEN_PORT};
+
+    access_log /var/log/nginx/shield-strfry.stream.log shield_stream_json;
+
+    js_var $shield_service strfry;
+
+    # Message policy (see shield.env for per-knob documentation).
+    js_var $shield_ws_max_msg ${SHIELD_WS_MAX_MSG};
+    js_var $shield_ws_max_subs ${SHIELD_WS_MAX_SUBS};
+    js_var $shield_ws_max_filters ${SHIELD_WS_MAX_FILTERS};
+    js_var $shield_ws_max_filter_items ${SHIELD_WS_MAX_FILTER_ITEMS};
+    js_var $shield_ws_msg_rate ${SHIELD_WS_MSG_RATE};
+    js_var $shield_ws_msg_burst ${SHIELD_WS_MSG_BURST};
+    js_var $shield_ws_event_rate ${SHIELD_WS_EVENT_RATE};
+    js_var $shield_ws_event_burst ${SHIELD_WS_EVENT_BURST};
+    js_var $shield_ws_req_rate ${SHIELD_WS_REQ_RATE};
+    js_var $shield_ws_req_burst ${SHIELD_WS_REQ_BURST};
+    js_var $shield_nostr_types '${SHIELD_NOSTR_TYPES}';
+    js_var $shield_nostr_kind_deny '${SHIELD_NOSTR_KIND_DENY}';
+
+    js_filter shield.filter;
+
+    proxy_pass 127.0.0.1:${SHIELD_HTTP_PORT};
+    proxy_protocol on;
+    # Also the reaper for sessions the engine has killed but whose
+    # upstream ignored the injected Close frame.
+    proxy_timeout ${SHIELD_WS_IDLE_TIMEOUT};
+}

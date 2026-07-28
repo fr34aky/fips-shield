@@ -53,12 +53,16 @@ mechanisms:
 ## Layout
 
 ```text
-core/nginx/        shared http-context config: log format, limit zones,
+core/nginx/        nginx.conf (module loading, http+stream contexts) and
+                   shared http-context config: log format, limit zones,
                    WebSocket plumbing (*.conf.template, envsubst)
-profiles/strfry/   strfry relay profile: vhost template + operator notes
+core/njs/          shield_ws.js — WebSocket/Nostr inspection engine (njs)
+profiles/strfry/   strfry relay profile: http vhost + stream stage
+                   templates, operator notes
 deploy/container/  Dockerfile + compose for the shield-as-container mode
-deploy/host/       render.sh for nginx running directly on the fips node
-test/              validate.sh — render + nginx -t in Docker
+deploy/host/       render.sh + README for nginx directly on the fips node
+test/              validate.sh (static: render, build, nginx -t) and
+                   ws_smoke.sh (behavioral: real WS clients vs. policy)
 docs/plan.md       full implementation plan and phase status
 shield.env.example all tunables, documented
 ```
@@ -77,7 +81,9 @@ docker compose up -d
 
 ## Quick start — host mode
 
-For a node already running nginx (or preferring no containers):
+For a node already running nginx (or preferring no containers) —
+prerequisites (njs stream module, `stream{}` include) in
+[deploy/host/README.md](deploy/host/README.md):
 
 ```sh
 cp shield.env.example shield.env
@@ -100,20 +106,29 @@ curl -6 -H 'Accept: application/nostr+json' "http://<npub>.fips/"   # NIP-11
 
 All knobs live in `shield.env` (see `shield.env.example` for the full
 annotated list): bind address/port, upstream, per-node handshake rate
-and burst, per-node connection cap, WebSocket idle timeout, limit-zone
-sizing. Limit violations return 429 and are marked in the JSON access
-log (`"limited"`), which doubles as the detection-engine input in
-Phase 3.
+and connection cap, and the WebSocket message policy — message/EVENT/
+REQ token buckets, subscription and filter-complexity caps, message
+size, type allowlist, kind denylist. Connection-level violations
+return 429 and are marked in the JSON access log (`"limited"`);
+message-level violations close the WebSocket (NOTICE + 1008) and log a
+`shield-verdict` JSON line. Both streams are the detection-engine
+input in Phase 3.
 
 ## Validation
 
 ```sh
-test/validate.sh    # renders the example env, runs nginx -t (Docker)
+test/validate.sh    # static: render, build image, nginx -t
+test/ws_smoke.sh    # behavioral: WS clients vs. the message policy
 ```
+
+`ws_smoke.sh` runs a mock relay upstream plus raw-socket WebSocket
+clients inside the container's network namespace and asserts both
+halves of the enforcement contract per rule: the client is cut off,
+and the offending message never reached the upstream.
 
 ## Status / roadmap
 
-Phase 1 (this) — HTTP-level hardening and per-node rate limiting.
-See [docs/plan.md](docs/plan.md) for the full plan: WS message-aware
-filtering (2), detection & response engine (3), eBPF enforcement (4),
-second profile + CI (5).
+Phase 1 — HTTP-level hardening and per-node rate limiting. ✅
+Phase 2 — WebSocket message-aware filtering (njs stream stage). ✅
+See [docs/plan.md](docs/plan.md) for what's next: detection & response
+engine (3), eBPF enforcement (4), second profile + CI (5).

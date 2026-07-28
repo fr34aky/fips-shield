@@ -1,14 +1,21 @@
-# fips-shield profile: strfry Nostr relay.
+# fips-shield profile: strfry Nostr relay — http stage.
 #
-# Binds the host's fips0 mesh address and proxies to a strfry instance
-# that must listen on loopback only (see profiles/strfry/README.md).
+# Since Phase 2 this stage sits behind the stream stage
+# (20-strfry-ws.stream), which owns the fips0-facing listener and does
+# WebSocket message inspection. This stage listens on loopback only and
+# learns the real mesh source address via the PROXY protocol, so every
+# per-node limit below still keys on the client's /128.
+#
 # strfry's entire HTTP surface is GET / — a WebSocket upgrade for the
 # relay protocol, or a NIP-11 info document when requested with
 # "Accept: application/nostr+json". Everything else is dropped.
 
 server {
-    listen [${SHIELD_BIND_ADDR}]:${SHIELD_LISTEN_PORT} default_server;
+    listen 127.0.0.1:${SHIELD_HTTP_PORT} proxy_protocol default_server;
     server_name ${SHIELD_SERVER_NAME};
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
 
     access_log /var/log/nginx/shield-strfry.access.log shield_json;
 
@@ -19,7 +26,12 @@ server {
     client_header_timeout 10s;
     client_body_timeout 10s;
     large_client_header_buffers 2 8k;
-    keepalive_timeout 30s;
+
+    # One response per plain-HTTP connection. This is load-bearing for
+    # the stream stage's handshake sniffer: a connection that starts
+    # non-WebSocket can never smuggle a later upgrade past inspection,
+    # because the server side hangs up after the first response.
+    keepalive_timeout 0;
 
     # Concurrent WebSocket connections per mesh node.
     limit_conn shield_conn ${SHIELD_MAX_CONNS_PER_NODE};
@@ -38,6 +50,9 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $shield_connection_upgrade;
         proxy_set_header Host $host;
+        # Never negotiate permessage-deflate: the stream stage can only
+        # inspect uncompressed frames.
+        proxy_set_header Sec-WebSocket-Extensions "";
         # strfry reads the source address from this header when
         # relay.realIpHeader is set — keeps its own per-IP accounting
         # correct behind the proxy.

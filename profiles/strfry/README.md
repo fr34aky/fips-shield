@@ -40,7 +40,9 @@ sudo systemctl reload-or-restart fips-firewall.service
 Do **not** add a drop-in for strfry's own port (7777) — nothing on the
 mesh should reach it.
 
-## What this profile enforces (Phase 1)
+## What this profile enforces
+
+Connection level (Phase 1, http stage):
 
 - Surface reduction: strfry's HTTP surface is exactly `GET /`
   (WebSocket upgrade, or NIP-11 with `Accept: application/nostr+json`).
@@ -52,11 +54,32 @@ mesh should reach it.
 - Slow-client containment: header/body timeouts, small header buffers,
   4k body cap (Nostr carries no HTTP bodies).
 - Idle WebSocket reaping after `SHIELD_WS_IDLE_TIMEOUT`.
-- Structured JSON access log (`shield-strfry.access.log`) with the
-  source node address and limiter status on every line — the input for
-  the Phase 3 detection engine.
 
-Not yet enforced (later phases): anything inside the WebSocket after
-the upgrade — REQ floods, EVENT spam, oversized filters. Until Phase 2
-lands, pair this profile with strfry's own `writePolicy` plugin and
-`maxWebsocketPayloadSize` for message-level control.
+Message level (Phase 2, stream stage — every Nostr message is
+inspected before strfry sees it; a rejected message never reaches the
+relay):
+
+- WebSocket protocol strictness: masked client frames only, no RSV
+  bits, no binary frames, sane fragmentation, whole-message size cap
+  (`SHIELD_WS_MAX_MSG`).
+- Per-connection token buckets: all messages (`SHIELD_WS_MSG_RATE`),
+  EVENT publishes (`SHIELD_WS_EVENT_RATE`), REQ/COUNT queries
+  (`SHIELD_WS_REQ_RATE`), each with a burst knob.
+- REQ policy: subscription cap (`SHIELD_WS_MAX_SUBS`), filters per
+  query (`SHIELD_WS_MAX_FILTERS`), total filter complexity
+  (`SHIELD_WS_MAX_FILTER_ITEMS`).
+- Message-type allowlist (`SHIELD_NOSTR_TYPES`) and event-kind
+  denylist (`SHIELD_NOSTR_KIND_DENY`).
+- On violation: the client gets a `NOTICE` and a 1008 Close, both
+  sides are torn down, and a `shield-verdict` JSON line lands in the
+  error log (plus the session log's `verdict` field) for the Phase 3
+  detection engine.
+
+Note: the shield strips `Sec-WebSocket-Extensions` from handshakes, so
+permessage-deflate is never negotiated — frames must stay uncompressed
+to be inspectable. strfry's own `writePolicy` remains useful for
+content-level decisions (spam scoring, pubkey reputation); the shield
+handles the transport- and rate-level abuse in front of it.
+
+Still later phases: automated bans from repeated verdicts (Phase 3
+detection engine, Phase 4 eBPF enforcement).

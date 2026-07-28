@@ -34,19 +34,31 @@ limits, detections, and bans key on the source /128.
   (`render.sh`).
 - `test/validate.sh`: render + `nginx -t` in Docker.
 
-## Phase 2 — WebSocket message-aware filtering
+## Phase 2 — WebSocket message-aware filtering ✅
 
-- nginx `stream` stage in front of the http stage; njs `js_filter`
-  passes the WS handshake through, then parses client→server frames
-  (unmasking included) and the Nostr JSON inside.
-- Per-connection token buckets for `REQ`/`EVENT`/`COUNT`; caps on
-  subscription count, filter complexity, frame size; kind allow/deny
-  lists per profile.
-- Violations: close the connection + emit a verdict log line.
-- Risk: njs frame parsing is the hardest deliverable. Fallbacks:
-  OpenResty/`lua-resty-websocket`, or relay-native policy (strfry
-  `writePolicy`) for the message layer while nginx keeps the
-  connection layer.
+- nginx `stream` stage owns the fips0 listener; njs engine
+  (`core/njs/shield_ws.js`) sniffs the handshake (non-WS sessions pass
+  through, pinned to one response by `keepalive_timeout 0`), then
+  parses client→server WS frames (unmasking, fragmentation, 16/64-bit
+  lengths) and the Nostr JSON inside. Messages are held until
+  inspected — a rejected message never reaches the relay. http stage
+  moved to loopback behind PROXY protocol + realip, so per-node limits
+  still key on the mesh /128.
+- Enforced: protocol strictness (mask/RSV/opcodes), whole-message size
+  cap, per-connection token buckets (all messages / EVENT / REQ+COUNT),
+  subscription cap, filter count + complexity caps, message-type
+  allowlist, kind denylist.
+- Violations: NOTICE + 1008 Close to the client, Close to the upstream
+  (njs cannot hard-kill from a filter callback; the upstream closing
+  tears the session down, proxy_timeout as backstop), structured
+  `shield-verdict` line in the error log + `verdict` field in the
+  stream session log.
+- `Sec-WebSocket-Extensions` is stripped in the handshake so
+  permessage-deflate is never negotiated (frames must stay
+  inspectable).
+- Covered by `test/ws_smoke.sh`: mock relay + raw-socket WS clients
+  assert per rule that the client is cut and the message never reached
+  the upstream (incl. fragmentation reassembly and flood-tail cases).
 
 ## Phase 3 — Detection & response engine
 
