@@ -58,21 +58,13 @@ test-filters: ## detection: fail2ban filters match real log lines
 .PHONY: test
 test: validate test-filters test-ws test-ban test-tcp test-http test-guard ## run the full suite
 
-# GUARD=yes|no leaves the eBPF backend out of the decision; unset asks
-# when this host can run it. NGINX=no is the split deployment: nginx in a
-# container, detection and enforcement here.
-GUARD ?=
-NGINX ?= yes
-install_flags = $(if $(filter yes,$(GUARD)),--with-guard,)$(if $(filter no,$(GUARD)),--without-guard,) \
-                $(if $(filter no,$(NGINX)),--no-nginx,)
-
 .PHONY: install
-install: ## host mode: nginx configs + detection, optional eBPF guard (needs root)
-	deploy/host/install.sh $(ENV) $(install_flags)
-
-.PHONY: install-split
-install-split: ## split mode: detection + optional guard only, nginx stays in its container (needs root)
-	deploy/host/install.sh $(ENV) --no-nginx $(if $(filter no,$(GUARD)),--without-guard,--with-guard)
+install: ## host mode: render configs, install detection + guard (needs root)
+	deploy/host/render.sh $(ENV)
+	deploy/host/install-fail2ban.sh $(ENV)
+	@echo
+	@echo "nginx: run 'nginx -t && systemctl reload nginx'"
+	@echo "guard: see guard/README.md to install the eBPF backend"
 
 # install-guard deliberately does NOT depend on `guard`: it needs root,
 # `guard` is a phony target whose recipe always runs, and a rustup

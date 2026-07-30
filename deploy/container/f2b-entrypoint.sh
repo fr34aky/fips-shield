@@ -5,7 +5,7 @@
 # to only validate the configuration).
 set -eu
 
-envsubst '${SHIELD_BAN_FILE} ${SHIELD_BAN_ALSO_FILE}' \
+envsubst '${SHIELD_BAN_FILE}' \
     < /etc/fail2ban/fips-shield-action.conf.template \
     > /etc/fail2ban/action.d/fips-shield.conf
 

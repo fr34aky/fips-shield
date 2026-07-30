@@ -95,11 +95,9 @@ guard/             fips-guard — eBPF enforcement backend (Rust/aya + a
 profiles/strfry/   strfry relay: http vhost + stream stage, WS-aware
 profiles/http/     any HTTP app: request rate, method/path allowlists
 profiles/tcp/      any plain TCP service: one stream server block
-deploy/container/  Dockerfiles (shield, fail2ban sidecar) + compose.yaml
-                   (all-container) and compose.split.yaml (nginx only)
-deploy/host/       install.sh (one step: configs, detection, optional
-                   guard), render.sh, install-fail2ban.sh, logrotate
-                   snippet + README for running on the fips node
+deploy/container/  Dockerfiles (shield, fail2ban sidecar) + compose
+deploy/host/       render.sh, install-fail2ban.sh + README for running
+                   directly on the fips node
 test/              validate.sh (static), ws_smoke.sh (WS policy),
                    ban_smoke.sh (detection→enforcement loop),
                    tcp_smoke.sh, http_smoke.sh (generic profiles),
@@ -125,33 +123,16 @@ docker compose up -d
 
 ## Quick start — host mode
 
-For a node already running nginx, or one that cannot run containers at
-all (FreeBSD) — prerequisites (njs stream module, `stream{}` include) in
+For a node already running nginx (or preferring no containers) —
+prerequisites (njs stream module, `stream{}` include) in
 [deploy/host/README.md](deploy/host/README.md):
 
 ```sh
 cp shield.env.example shield.env
 $EDITOR shield.env
-sudo make install            # nginx configs + detection; offers the eBPF guard
+sudo deploy/host/render.sh shield.env /etc/nginx/conf.d
 sudo nginx -t && sudo systemctl reload nginx
 ```
-
-## Quick start — split mode (containerized nginx, kernel enforcement)
-
-nginx in a container, detection and eBPF bans on the host — the shape to
-use when you want kernel-level enforcement without running nginx on the
-host:
-
-```sh
-cd deploy/container && cp ../../shield.env.example shield.env && $EDITOR shield.env
-docker compose -f compose.split.yaml up -d
-cd ../.. && make guard && sudo make install-split
-sudo install -m 644 deploy/host/fips-shield.logrotate /etc/logrotate.d/fips-shield
-sudo systemctl enable --now fips-guard
-```
-
-All three shapes are compared in
-[docs/guide.md § 3](docs/guide.md#3-installing-and-running).
 
 Then configure the protected service per its profile README
 ([strfry](profiles/strfry/README.md)) and, if the FIPS mesh firewall is
