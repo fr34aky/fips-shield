@@ -11,7 +11,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${1:?usage: install-fail2ban.sh <shield.env>}"
-F2B_DIR="${2:-/etc/fail2ban}"
+# Second argument wins, then the environment, then the Linux default.
+# FreeBSD keeps fail2ban's configuration under /usr/local/etc/fail2ban.
+F2B_DIR="${2:-${F2B_DIR:-/etc/fail2ban}}"
 PREFIX="${PREFIX:-/usr/local}"
 
 # Read KEY=VALUE literally, exactly as docker --env-file does. Sourcing
@@ -47,7 +49,7 @@ else
     install -m 755 "$REPO_ROOT"/core/actions/shield-ban "$BAN_BIN"
 fi
 
-envsubst '${SHIELD_BAN_FILE}' \
+envsubst '${SHIELD_BAN_FILE} ${SHIELD_BAN_ALSO_FILE}' \
     < "$REPO_ROOT"/core/fail2ban/action.d/fips-shield.conf.template \
     > "$F2B_DIR/action.d/fips-shield.conf"
 

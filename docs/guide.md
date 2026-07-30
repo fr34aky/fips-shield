@@ -126,7 +126,19 @@ the identical command (`shield-ban`), and you can run either or both:
 ## 3. Installing and running
 
 You need a FIPS node with the daemon running, and a service you want to
-protect. Two ways to run the shield — pick one.
+protect. Three ways to run the shield — pick one.
+
+| Shape | nginx | detection + bans | Use when |
+|---|---|---|---|
+| **A — container** | container | fail2ban sidecar | Getting started; no host changes beyond Docker |
+| **B — host** | host | host | FreeBSD, or a node already running nginx; the portable one |
+| **C — split** | container | host | You want kernel enforcement (eBPF) with a containerized nginx |
+
+The eBPF guard only works in shapes B and C: it needs a tc hook on the
+host's `fips0` and maps in the host's bpffs, and fail2ban has to be able
+to invoke it. The sidecar in shape A cannot, so its bans are enforced by
+nginx from the banlist file (which is portable and perfectly effective —
+just not free per packet, and only for services behind the shield).
 
 ### Before you start: bind your service to loopback
 
@@ -214,7 +226,64 @@ sudo deploy/host/install-fail2ban.sh shield.env
 sudo fail2ban-client -t && sudo systemctl reload fail2ban
 ```
 
-Or simply `sudo make install`, which runs both steps.
+Or simply `sudo make install`, which runs both steps and offers the eBPF
+guard if this host can run it:
+
+```sh
+sudo make install                  # asks about the guard
+sudo make install GUARD=yes        # or decide up front
+sudo make install GUARD=no
+```
+
+Under the hood that is `deploy/host/install.sh`, which you can call
+directly for the same result. It never installs the guard silently: with
+no flag it asks on a terminal, and answers "no" when there isn't one, so
+automation cannot pick up a kernel component by surprise. If the host
+cannot run it — not Linux, no bpffs, binary not built — it says which
+and carries on with the portable backend.
+
+### Option C — split: nginx in a container, enforcement on the host
+
+The shape to use if you want kernel-level bans without running nginx on
+the host. nginx stays containerized (it is the process parsing hostile
+input); fail2ban and the eBPF guard live on the host, where they can
+reach `fips0` and its bpffs.
+
+```sh
+cd deploy/container
+cp ../../shield.env.example shield.env
+$EDITOR shield.env
+docker compose -f compose.split.yaml up -d
+
+cd ../..
+make guard                                    # as you, not under sudo
+sudo make install-split                       # detection + guard, no nginx render
+sudo install -m 644 deploy/host/fips-shield.logrotate \
+    /etc/logrotate.d/fips-shield
+sudo systemctl daemon-reload && sudo systemctl enable --now fips-guard
+```
+
+`compose.split.yaml` differs from `compose.yaml` in three ways: no
+fail2ban sidecar, and the logs and banlist are host bind mounts at the
+*same* paths (`/var/log/nginx`, `/var/lib/fips-shield`) rather than named
+volumes. The paths match because they are baked into both the profile
+templates and the fail2ban jails — mounting them 1:1 means host fail2ban
+reads the logs and writes bans with no configuration changes on either
+side. `/var/log/nginx` is free on the host precisely because nginx is in
+the container.
+
+Two things to know about this shape:
+
+- **Log rotation becomes yours.** Nothing else rotates those files, and
+  nginx keeps writing to a rotated inode until told to reopen. The
+  logrotate snippet above sends `USR1` into the container; without it the
+  live log stays empty and fail2ban goes blind.
+- **Enforcement is kernel-side.** The guard drops at `fips0` ingress, so
+  banned traffic never reaches nginx and the banlist file stays empty.
+  That is strictly stronger than rejecting at accept. If you also want
+  the nginx layer to see bans — as a fallback while the guard is
+  unloaded, and so `shield-ban list` agrees across layers — set
+  `SHIELD_BAN_ALSO_FILE=true` in `shield.env`.
 
 ### Open the port on the mesh firewall
 
@@ -487,51 +556,35 @@ service on the mesh interface — including ones not behind the shield,
 like SSH on its own port. Linux only; needs root.
 
 ```sh
-make install-guard
+make guard                             # as you, not under sudo
+sudo make install-guard
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-guard
 ```
 
-That installs `shield-ban` as the guard's wrapper, so a **host-mode**
-detection engine starts enforcing in the kernel with no other changes.
+That installs `shield-ban` as the guard's wrapper, so detection starts
+enforcing in the kernel with no other changes — **provided fail2ban runs
+on the host**, i.e. deployment shape B or C.
 
-> ⚠️ **The container-mode fail2ban sidecar cannot drive the guard.**
-> The sidecar image carries its own `/usr/local/bin/shield-ban` — the
-> banlist-file backend — and has no access to the host's bpffs, so it
-> writes bans to the shared banlist and never calls `fips-guard`. The
-> symptom is exactly this: `fail2ban-client banned` lists the node,
-> nginx rejects it at accept, and `fips-guard stats` reports `bans 0`
-> with zero drops. Enforcement is working, just at the nginx layer
-> rather than in the kernel.
+> ⚠️ **The container-mode fail2ban sidecar cannot drive the guard.** Its
+> image carries its own `/usr/local/bin/shield-ban` (the banlist-file
+> backend) and has no access to the host's bpffs, so it writes bans to
+> the shared banlist and never calls `fips-guard`. The symptom:
+> `fail2ban-client banned` lists the node, nginx rejects it at accept,
+> and `fips-guard stats` reports `bans 0` with zero drops. Enforcement is
+> working — at the nginx layer rather than in the kernel.
 >
-> To put the guard behind detection, run fail2ban on the host instead of
-> as a sidecar:
->
-> ```sh
-> docker compose stop fail2ban       # or remove it from compose.yaml
-> sudo deploy/host/install-fail2ban.sh shield.env
-> sudo fail2ban-client -t && sudo systemctl reload fail2ban
-> ```
->
-> Host fail2ban has to read the shield's logs, which live in the
-> `shield-logs` volume. Either bind-mount them to a host path in
-> `compose.yaml`:
->
-> ```yaml
->     volumes:
->       - /var/log/fips-shield:/var/log/nginx
-> ```
->
-> and set the jails' `logpath` accordingly, or point `logpath` at the
-> volume's own directory (`docker volume inspect <name>`), which is
-> workable but breaks if the volume is recreated.
+> The fix is deployment shape C, [Option C](#option-c--split-nginx-in-a-container-enforcement-on-the-host):
+> keep nginx containerized, move detection and the guard to the host.
 >
 > Keeping the sidecar *and* using the guard would mean installing
-> `fips-guard` into that image, mounting `/sys/fs/bpf`, and granting
-> `CAP_BPF`+`CAP_NET_ADMIN`. Only the map-writing verbs are needed
-> (`load` stays on the host), but the sidecar is Alpine, so it would
-> need a musl build of the guard. Untested — the host-mode route above
-> is the supported one.
+> `fips-guard` into that image, mounting bpffs, and granting
+> `CAP_BPF`+`CAP_NET_ADMIN` — only the map-writing verbs are needed, as
+> `load` stays on the host. Verified workable in principle (two
+> capabilities suffice, and bind-mounting bpffs somewhere other than
+> `/sys` avoids AppArmor's `/sys/**` write denial), but the sidecar is
+> Alpine, so it needs a musl build of the guard. Untested; shape C is the
+> supported route.
 
 Verify the guard enforces at all, independently of detection:
 

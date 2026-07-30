@@ -1,0 +1,42 @@
+# Log rotation for the fips-shield nginx logs.
+#
+#   sudo install -m 644 deploy/host/fips-shield.logrotate \
+#       /etc/logrotate.d/fips-shield
+#
+# Only needed when nginx runs in a container and its logs are bind-mounted
+# to the host (the split deployment), because nothing else rotates them:
+# the distro's own /etc/logrotate.d/nginx signals a host nginx, which is
+# not the process holding these files open.
+#
+# nginx keeps writing to the rotated inode until it is told to reopen, so
+# the postrotate signal is not optional — without it the "current" log
+# stays empty, the rotated file grows forever, and fail2ban silently sees
+# nothing. USR1 is nginx's reopen-logs signal.
+#
+# If nginx runs directly on the host instead, delete the postrotate block
+# below and let the distro nginx snippet handle these files, or replace
+# the signal with the usual /run/nginx.pid form.
+
+/var/log/nginx/shield-*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    # root:root deliberately: fail2ban reads these as root, and nginx's
+    # master process (root, in the container) is what opens and reopens
+    # them — workers write through an already-open fd, so they need no
+    # permission on the file itself. Avoids depending on a www-data or
+    # adm account existing on a host that does not run nginx natively.
+    create 0640 root root
+    postrotate
+        # container_name from compose.split.yaml. `docker kill` only
+        # delivers a signal here; it does not stop anything. Tolerated
+        # failure so a stopped shield cannot fail the rotation run.
+        if command -v docker >/dev/null 2>&1; then
+            docker kill -s USR1 fips-shield >/dev/null 2>&1 || true
+        fi
+    endscript
+}
