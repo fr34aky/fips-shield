@@ -43,10 +43,26 @@ make guard
 
 On Debian/Ubuntu/Mint the two packages are `clang` and `linux-libc-dev`
 (the latter provides `asm/types.h`, which `linux/bpf.h` includes).
-Without clang the build script stops with:
+
+The LLVM apt repository installs versioned binaries (`clang-19`,
+`clang-18`, …) with no unversioned `clang` symlink unless the `clang`
+meta package or an `update-alternatives` entry is also installed.
+`build.rs` handles that: it tries `clang` first, then the
+highest-numbered `clang-<N>` on `PATH`. Override the choice with
+`CLANG`, which is used verbatim:
+
+```sh
+CLANG=clang-19 cargo build --release
+```
+
+With no usable compiler the build script stops with the list of what it
+tried:
 
 ```text
-failed to run clang (install clang, or set CLANG / SHIELD_GUARD_BPF_OBJ)
+no working clang found (tried: clang, clang-19). Install it
+(Debian/Ubuntu: apt install clang linux-libc-dev), or set CLANG to a
+versioned binary such as clang-19, or point SHIELD_GUARD_BPF_OBJ at a
+prebuilt object
 ```
 
 ### Building for a host without clang
@@ -59,6 +75,9 @@ clang -O2 -g -target bpf -Wall -Werror \
     -I/usr/include/$(uname -m)-linux-gnu \
     -c bpf/shield_guard.bpf.c -o shield_guard.bpf.o
 ```
+
+(`clang-19` or whichever version you have — this one is invoked by hand,
+so it is not subject to the detection above.)
 
 Copy `shield_guard.bpf.o` to the target host and point the build at it,
 which skips the clang step entirely:
