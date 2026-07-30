@@ -12,6 +12,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${1:?usage: install-fail2ban.sh <shield.env>}"
 F2B_DIR="${2:-/etc/fail2ban}"
+PREFIX="${PREFIX:-/usr/local}"
 
 # Read KEY=VALUE literally, exactly as docker --env-file does. Sourcing
 # the file with "." would run it through the shell, so a value like
@@ -26,7 +27,25 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$ENV_FILE"
 
 install -m 644 "$REPO_ROOT"/core/fail2ban/filter.d/*.conf "$F2B_DIR/filter.d/"
-install -m 755 "$REPO_ROOT"/core/actions/shield-ban /usr/local/bin/shield-ban
+
+# The banlist backend always lands in the library directory, where the
+# eBPF wrapper expects to find it (SHIELD_BAN_ALSO_FILE).
+install -d "$PREFIX/lib/fips-shield"
+install -m 755 "$REPO_ROOT"/core/actions/shield-ban \
+    "$PREFIX/lib/fips-shield/shield-ban-file"
+
+# Installing it as *the* backend would silently undo `make install-guard`
+# on a host using kernel enforcement: fail2ban would keep banning, the
+# banlist file would keep growing, and `fips-guard stats` would sit at
+# zero drops. Leave an existing eBPF wrapper alone.
+BAN_BIN="$PREFIX/bin/shield-ban"
+if [ -e "$BAN_BIN" ] && grep -q 'enforcement backend: eBPF edition' "$BAN_BIN"; then
+    echo "note: $BAN_BIN is the eBPF guard wrapper — keeping it."
+    echo "      The file backend is installed as" \
+        "$PREFIX/lib/fips-shield/shield-ban-file."
+else
+    install -m 755 "$REPO_ROOT"/core/actions/shield-ban "$BAN_BIN"
+fi
 
 envsubst '${SHIELD_BAN_FILE}' \
     < "$REPO_ROOT"/core/fail2ban/action.d/fips-shield.conf.template \

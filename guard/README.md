@@ -150,6 +150,9 @@ install -m 755 target/release/fips-guard /usr/local/bin/fips-guard
 install -m 755 shield-ban /usr/local/bin/shield-ban
 ```
 
+Or `make install-guard` from the repository root, which does both plus
+the systemd unit.
+
 The Phase 3 jails and action need no changes — they call
 `shield-ban ban|unban`, which now enforces in the kernel. To also keep
 the banlist file in sync (so nginx's view agrees, and bans still apply
@@ -160,6 +163,19 @@ set `SHIELD_BAN_ALSO_FILE=true`:
 install -m 755 ../core/actions/shield-ban \
     /usr/local/lib/fips-shield/shield-ban-file
 ```
+
+**This requires fail2ban on the host.** The container-mode sidecar bakes
+its own copy of the banlist-file backend into the image and has no
+access to the host's bpffs, so it cannot invoke the guard: bans land in
+the shared banlist (where nginx enforces them) and `fips-guard stats`
+stays at zero. Run detection on the host — `deploy/host/install-fail2ban.sh`
+— if you want kernel enforcement. Details and the log-path wrinkle:
+[../docs/guide.md § 7](../docs/guide.md#7-optional-kernel-level-enforcement).
+
+`install-fail2ban.sh` and `make install` deliberately do not replace an
+already-installed guard wrapper; they put the file backend in
+`/usr/local/lib/fips-shield/shield-ban-file` instead. Check which
+backend is live with `head -3 /usr/local/bin/shield-ban`.
 
 Run `fips-guard load` at boot before the services it protects — a
 systemd unit example is in [../deploy/host/README.md](../deploy/host/README.md).
