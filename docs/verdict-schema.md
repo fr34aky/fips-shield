@@ -58,6 +58,14 @@ shield-ban list                  # active bans: "<ip> <until-epoch-s>"
 compressed IPv6). Idempotent: banning a banned IP replaces the expiry,
 unbanning an unknown IP succeeds.
 
+This CLI is the interface *between* detection and enforcement, not the
+operator interface. A backend has no way to inform fail2ban of a change,
+and fail2ban skips the ban action for any IP it already considers banned
+— so calling `ban`/`unban` by hand while the detection engine runs
+desyncs the two. Operators go through `fail2ban-client`
+([guide](guide.md#managing-bans-by-hand)); `check` and `list` are always
+safe, and are the way to see what is genuinely enforced.
+
 Backends:
 
 - **banlist file** (Phase 3, `core/actions/shield-ban`): maintains

@@ -61,6 +61,12 @@ fips-guard stats                       # counters + current config
 fips-guard unload --iface fips0        # detach and unpin
 ```
 
+`ban`/`unban` here write only the kernel maps. Once fail2ban is driving
+the guard, unban through `fail2ban-client unban <ip>` instead — a
+hand-unbanned node is not re-banned while fail2ban still holds its
+ticket ([guide](../docs/guide.md#managing-bans-by-hand)). `check`,
+`list` and `stats` are always safe.
+
 There is no daemon. The maps are pinned under `/sys/fs/bpf/fips-shield`
 (override with `--pin-dir` / `SHIELD_GUARD_PIN_DIR`) and the tc filter
 owns the program, so both survive the CLI exiting. Ban expiry is

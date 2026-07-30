@@ -365,27 +365,87 @@ A rejected message is **never forwarded** — your service never sees it.
 
 ### Managing bans by hand
 
+There are two ban registries, and they must agree:
+
+- **fail2ban** holds a ticket per banned node (in memory, plus its
+  SQLite database). This is what decides whether a *new* offence leads
+  to a ban.
+- **the enforcement backend** holds the banlist that nginx and the eBPF
+  guard actually read (`SHIELD_BAN_FILE`, or the pinned BPF maps).
+  `shield-ban` is its CLI.
+
+fail2ban drives the backend, never the reverse. **So while the
+detection engine is running, ban and unban through `fail2ban-client`**
+— it updates its own ticket *and* calls `shield-ban` for you. Use
+`shield-ban` directly for reading (`check`, `list`), and for writing
+only on a deployment with no fail2ban.
+
 ```sh
-shield-ban ban  fd97:...:1234 3600   # ban for an hour (0 = until unbanned)
-shield-ban unban fd97:...:1234
+# unban (all jails + fail2ban's database, and calls shield-ban unban)
+sudo fail2ban-client unban fd97:...:1234
+
+# ban for an hour, attributed to a specific jail
+sudo fail2ban-client set fips-shield-handshake banip fd97:...:1234 3600
+
+# read the enforcement backend
 shield-ban check fd97:...:1234       # exit 0 if banned
 shield-ban list                      # active bans and their expiry
 ```
 
-In container mode, run these inside the fail2ban container:
+Jail names are `fips-shield-handshake`, `fips-shield-verdict` and
+`fips-shield-scan`.
+
+> ⚠️ **Do not unban with `shield-ban unban` while fail2ban is
+> running.** It removes the entry nginx reads but leaves fail2ban's
+> ticket in place, and fail2ban will not re-ban a node it believes is
+> already banned — it logs `<ip> already banned` and skips the action.
+> The node then misbehaves freely until fail2ban's own ban time
+> expires, which with escalation (`bantime.increment`) can be days.
+> The symptom is a node that still trips the rate limits (429s in the
+> access log) but never reappears in `shield-ban list`. Fix it by
+> running `fail2ban-client unban <ip>`, which clears the stale ticket
+> even when the file entry is already gone.
+>
+> The same caveat applies to `shield-ban ban`: the ban is enforced, but
+> fail2ban knows nothing about it and will not extend or escalate it.
+
+In container mode, run all of these inside the fail2ban container:
 
 ```sh
+docker compose exec fail2ban fail2ban-client unban fd97:...:1234
 docker compose exec fail2ban shield-ban list
 ```
 
-### Seeing what fail2ban is doing
+### Checking every jail at once
 
 ```sh
-sudo fail2ban-client status                          # jails
-sudo fail2ban-client status fips-shield-verdict      # one jail's bans
-# container mode:
-docker compose exec fail2ban fail2ban-client status
+sudo fail2ban-client banned          # every jail's banned IPs, as a dict
+sudo fail2ban-client status          # which jails exist
 ```
+
+`banned` is the quickest way to see the whole picture, and the one to
+compare against the backend. The two lists should match:
+
+```sh
+sudo fail2ban-client banned          # what detection thinks is banned
+shield-ban list                      # what is actually enforced
+```
+
+An address in the first but not the second is the desync described
+above. An address in the second but not the first is a manual or
+expired-in-fail2ban ban that is still being enforced — harmless, and
+it lapses at its own expiry.
+
+Per-jail detail, including the match counter and the current ban list:
+
+```sh
+sudo fail2ban-client status fips-shield-verdict
+```
+
+If a counter stays at zero the jail is not reading its log; if it
+climbs without banning, look for `already banned` in fail2ban's log
+(`/var/log/fail2ban.log` — inside the sidecar in container mode, not
+in the shared log volume).
 
 ### Reading the logs
 
@@ -463,8 +523,17 @@ it directly. Confirm with `ss -tulnp` that it listens only on
 
 **A legitimate client keeps getting refused.**
 Check whether it is banned (`shield-ban check <addr>`) and why
-(`grep <addr> /var/log/nginx/shield-error.log`). Unban it, raise the
-limit that fired, and consider adding it to `SHIELD_F2B_IGNOREIP`.
+(`grep <addr> /var/log/nginx/shield-error.log`). Unban it with
+`fail2ban-client unban <addr>`, raise the limit that fired, and
+consider adding it to `SHIELD_F2B_IGNOREIP`.
+
+**A node keeps misbehaving but is never banned again.**
+Almost always a previous unban that bypassed fail2ban. Compare
+`fail2ban-client banned` with `shield-ban list`: if the address is in
+the first and not the second, fail2ban still holds a ticket and is
+skipping the ban action (`grep "already banned" /var/log/fail2ban.log`).
+`fail2ban-client unban <addr>` clears it. See
+[managing bans by hand](#managing-bans-by-hand).
 
 **nginx will not start after a config change.**
 Run `sudo nginx -t` — it names the file and line. In host mode, a

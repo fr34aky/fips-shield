@@ -190,7 +190,23 @@ which maintains the banlist file. nginx rejects banned nodes at
 connection accept and cuts their live sessions within
 `SHIELD_BAN_RECHECK` seconds. Ban times escalate (doubling up to a
 week) for nodes that keep coming back; expiry and unban restore
-service automatically. Manual control uses the same tool:
+service automatically.
+
+Manual control goes through fail2ban, so that its ticket and the
+enforcement backend stay in step — fail2ban will not re-ban a node it
+believes is already banned, so unbanning behind its back leaves the
+node effectively immune until its ticket expires:
+
+```sh
+fail2ban-client banned                                   # every jail's bans
+fail2ban-client unban fd97::x                            # all jails + backend
+fail2ban-client set fips-shield-handshake banip fd97::x 3600
+```
+
+`shield-ban` is the enforcement backend's own CLI — use it to read what
+is actually being enforced (`check`, `list`), and to write only where no
+detection engine is running. Full procedure:
+[docs/guide.md § managing bans by hand](docs/guide.md#managing-bans-by-hand).
 
 ```sh
 shield-ban ban fd97::x 3600 | unban fd97::x | check fd97::x | list
