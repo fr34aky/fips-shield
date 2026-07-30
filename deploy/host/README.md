@@ -64,14 +64,20 @@ sudo fail2ban-client -t && sudo systemctl reload fail2ban
 ## eBPF guard (optional, Linux only)
 
 Kernel-level enforcement instead of nginx-level: bans cover every
-listener on `fips0` and cost nothing per packet. Build and install
-per [../../guard/README.md](../../guard/README.md), then:
+listener on `fips0` and cost nothing per packet. Build as your normal
+user (needs `clang`; see
+[../../guard/README.md](../../guard/README.md), including how to build
+for a host without clang), then install as root:
 
 ```sh
-sudo install -m 644 deploy/host/fips-guard.service /etc/systemd/system/
+make guard                     # as you — not under sudo
+sudo make install-guard        # installs fips-guard + the systemd unit
 printf 'SHIELD_GUARD_IFACE=fips0\n' | sudo tee /etc/default/fips-guard
 sudo systemctl enable --now fips-guard
 ```
+
+`make guard` must run as your own user: with a rustup toolchain, `cargo`
+lives in `~/.cargo/bin`, which sudo's `secure_path` excludes.
 
 With `/usr/local/bin/shield-ban` pointing at the guard wrapper, the
 existing fail2ban jails enforce in the kernel with no other changes.

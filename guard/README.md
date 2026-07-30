@@ -33,11 +33,55 @@ mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
 ```
 
 Build needs a Rust toolchain and `clang` (compiles the BPF object;
-`build.rs` embeds it in the binary). To build where clang is
-unavailable, point `SHIELD_GUARD_BPF_OBJ` at a prebuilt object.
+`build.rs` embeds it in the binary).
 
 ```sh
 cargo build --release          # -> target/release/fips-guard
+# or, from the repository root:
+make guard
+```
+
+On Debian/Ubuntu/Mint the two packages are `clang` and `linux-libc-dev`
+(the latter provides `asm/types.h`, which `linux/bpf.h` includes).
+Without clang the build script stops with:
+
+```text
+failed to run clang (install clang, or set CLANG / SHIELD_GUARD_BPF_OBJ)
+```
+
+### Building for a host without clang
+
+You do not need clang on the node you deploy to — only on whatever
+machine compiles the object. Build it once where clang exists:
+
+```sh
+clang -O2 -g -target bpf -Wall -Werror \
+    -I/usr/include/$(uname -m)-linux-gnu \
+    -c bpf/shield_guard.bpf.c -o shield_guard.bpf.o
+```
+
+Copy `shield_guard.bpf.o` to the target host and point the build at it,
+which skips the clang step entirely:
+
+```sh
+SHIELD_GUARD_BPF_OBJ=/path/to/shield_guard.bpf.o cargo build --release
+```
+
+The object is architecture-independent BPF bytecode, but it is
+generated from the headers of the machine that compiled it — build it
+on the same distribution family as the target. Simpler still: build the
+whole `fips-guard` binary on the build host and copy that single file
+over; it embeds the object and needs no runtime assets.
+
+### Installing
+
+Build as your normal user, install as root — `make install-guard` does
+not rebuild, precisely so it can be run under `sudo` when the Rust
+toolchain lives in your `~/.cargo/bin` (outside sudo's `secure_path`):
+
+```sh
+make guard                     # as you
+sudo make install-guard        # as root
 ```
 
 ## Use

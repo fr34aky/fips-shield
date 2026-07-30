@@ -66,8 +66,20 @@ install: ## host mode: render configs, install detection + guard (needs root)
 	@echo "nginx: run 'nginx -t && systemctl reload nginx'"
 	@echo "guard: see guard/README.md to install the eBPF backend"
 
+# install-guard deliberately does NOT depend on `guard`: it needs root,
+# `guard` is a phony target whose recipe always runs, and a rustup
+# toolchain lives in the invoking user's ~/.cargo/bin — outside sudo's
+# secure_path. Rebuilding here would therefore fail under sudo
+# ("cargo: command not found") or, worse, build as root.
+# Build as your normal user, install as root.
 .PHONY: install-guard
-install-guard: guard ## install the eBPF guard and its systemd unit (needs root)
+install-guard: ## install the eBPF guard and its systemd unit (run `make guard` first, needs root)
+	@test -x guard/target/release/fips-guard || { \
+	    echo "guard/target/release/fips-guard not built."; \
+	    echo "Run 'make guard' as your normal user first (needs clang);"; \
+	    echo "see guard/README.md for hosts without clang."; \
+	    exit 1; \
+	}
 	install -m 755 guard/target/release/fips-guard $(PREFIX)/bin/fips-guard
 	install -m 755 guard/shield-ban $(PREFIX)/bin/shield-ban
 	install -d $(PREFIX)/lib/fips-shield
