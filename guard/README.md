@@ -184,8 +184,14 @@ and never touches the interface.
 sudo make install-guard                       # host side, once
 sudo systemctl enable --now fips-guard
 cd deploy/container
-docker compose -f compose.yaml -f compose.guard.yaml up -d
+docker compose -f compose.yaml -f compose.guard.yaml up -d --build
 ```
+
+`--build` matters: `docker compose up` reuses an existing image even when
+the Dockerfile has changed, so without it an older Alpine-based sidecar
+keeps running and cannot execute the mounted glibc binary. The container
+checks this at startup and refuses to start rather than silently banning
+into nothing — `docker compose logs fail2ban` says which case you are in.
 
 The overlay adds three things to the sidecar, and nothing else changes —
 same jails, same filters, same action:

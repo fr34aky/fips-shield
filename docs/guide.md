@@ -501,8 +501,13 @@ with the detection sidecar, so fail2ban bans in the kernel instead of
 writing a banlist file:
 
 ```sh
-docker compose -f compose.yaml -f compose.guard.yaml up -d
+docker compose -f compose.yaml -f compose.guard.yaml up -d --build
 ```
+
+`--build` is required the first time: `compose up` reuses an existing
+image when the Dockerfile changes, and the sidecar has to be rebuilt to
+run the host's binary. It verifies this at startup and refuses to start
+if the wiring is wrong, so check `docker compose logs fail2ban`.
 
 The sidecar gets `CAP_BPF` and the host's `fips-guard` bind-mounted; it
 keeps `network_mode: none` and needs no `CAP_NET_ADMIN`, because loading
