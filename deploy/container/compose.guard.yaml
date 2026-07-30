@@ -1,0 +1,50 @@
+# Overlay that points the detection sidecar at the host's eBPF guard, so
+# fail2ban bans and unbans in the kernel instead of writing a banlist
+# file that only nginx reads.
+#
+#   sudo make install-guard                    # host side, once
+#   sudo systemctl enable --now fips-guard
+#   docker compose -f compose.yaml -f compose.guard.yaml up -d
+#
+# Remove the "-f compose.guard.yaml" to go back to the file backend;
+# nothing else changes, and the jails are identical either way.
+#
+# How it works: fips-guard keeps its state in BPF maps pinned to the
+# host's bpffs. Pins are just filesystem objects, so a second process —
+# in another container, even with no network — can open them and add or
+# remove ban entries. The tc classifier on fips0 reads those maps on
+# every packet. So the sidecar performs kernel-level enforcement without
+# loading anything, and without CAP_NET_ADMIN.
+#
+# Both host binaries are bind-mounted rather than baked into the image,
+# so the container always runs exactly the guard the host is running:
+# no version skew between the writer and the classifier reading its maps.
+#
+# Requires the host side to be installed first — the mounts are files,
+# and Docker would create directories in their place if they were
+# missing, which fails confusingly.
+
+services:
+  fail2ban:
+    # CAP_BPF only. Map access needs it; CAP_NET_ADMIN is not required
+    # because attaching the classifier (fips-guard load) stays on the
+    # host under systemd, where PartOf=fips.service re-attaches it when
+    # the daemon restarts. The container keeps network_mode: none from
+    # the base compose file.
+    cap_add:
+      - BPF
+    volumes:
+      # The enforcement backend and its CLI, straight from the host.
+      - /usr/local/bin/fips-guard:/usr/local/bin/fips-guard:ro
+      - /usr/local/bin/shield-ban:/usr/local/bin/shield-ban:ro
+      # bpffs, deliberately NOT at /sys/fs/bpf: AppArmor's docker-default
+      # profile denies writes under /sys/**, which makes map creation
+      # fail with EACCES. The path inside the container is what the
+      # profile matches, so mounting it elsewhere works with default
+      # AppArmor and default seccomp — no --privileged, no
+      # security-opt overrides.
+      - /sys/fs/bpf:/mnt/bpf
+    environment:
+      # Must match the host's pin directory with /sys/fs/bpf rewritten to
+      # the mount point above. The host default is /sys/fs/bpf/fips-shield.
+      SHIELD_GUARD_PIN_DIR: /mnt/bpf/fips-shield

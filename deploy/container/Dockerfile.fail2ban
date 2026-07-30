@@ -1,21 +1,44 @@
 # fips-shield detection sidecar: fail2ban tailing the shield logs on a
-# shared volume, banning via the shield-ban backend onto the shared
-# banlist volume. Needs no network and no docker socket.
+# shared volume, banning through the shield-ban backend. Needs no
+# network and no docker socket.
 #
 # Build from the repository root:
 #   docker build -f deploy/container/Dockerfile.fail2ban -t fips-shield-f2b .
+#
+# Debian rather than Alpine, deliberately. With the eBPF backend
+# (deploy/container/compose.guard.yaml) the host's fips-guard binary is
+# bind-mounted in and executed here, and that binary is linked against
+# glibc — it cannot run on musl. Keeping the base glibc means the same
+# binary works on the host and in this container, with no second build
+# target and no version skew between them.
+FROM debian:12-slim
 
-FROM alpine:3.22
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        fail2ban gettext-base \
+    && rm -rf /var/lib/apt/lists/* \
+    `# Debian enables an sshd jail out of the box; this container has no` \
+    `# network and no sshd, and the shield's jails are installed by the` \
+    `# entrypoint.` \
+    && rm -f /etc/fail2ban/jail.d/defaults-debian.conf
 
-RUN apk add --no-cache fail2ban bash gettext \
-    && rm -f /etc/fail2ban/jail.d/alpine-ssh.conf
+# Debian's fail2ban.conf leaves allowipv6 unset, which means "auto" — it
+# probes the host for IPv6 support and silently refuses to handle IPv6
+# addresses if the probe says no. Every address this container ever sees
+# is a mesh /128, so a wrong guess means no bans at all. Assert it.
+RUN printf '[Definition]\nallowipv6 = true\n' > /etc/fail2ban/fail2ban.local
 
 COPY core/fail2ban/filter.d/ /etc/fail2ban/filter.d/
 COPY core/fail2ban/action.d/fips-shield.conf.template /etc/fail2ban/fips-shield-action.conf.template
 COPY core/fail2ban/jail.d/fips-shield.local.template /etc/fail2ban/
 COPY core/actions/shield-ban /usr/local/bin/shield-ban
+# Also as the file backend under its library name: with the eBPF wrapper
+# bind-mounted over /usr/local/bin/shield-ban, this is where that wrapper
+# looks when SHIELD_BAN_ALSO_FILE=true.
+COPY core/actions/shield-ban /usr/local/lib/fips-shield/shield-ban-file
 COPY deploy/container/f2b-entrypoint.sh /f2b-entrypoint.sh
-RUN chmod +x /usr/local/bin/shield-ban /f2b-entrypoint.sh
+RUN chmod +x /usr/local/bin/shield-ban \
+    /usr/local/lib/fips-shield/shield-ban-file /f2b-entrypoint.sh
 
 ENTRYPOINT ["/f2b-entrypoint.sh"]
 CMD ["fail2ban-server", "-xf", "start"]

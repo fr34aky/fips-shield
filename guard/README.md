@@ -164,18 +164,70 @@ install -m 755 ../core/actions/shield-ban \
     /usr/local/lib/fips-shield/shield-ban-file
 ```
 
-**This requires fail2ban on the host.** The container-mode sidecar bakes
-its own copy of the banlist-file backend into the image and has no
-access to the host's bpffs, so it cannot invoke the guard: bans land in
-the shared banlist (where nginx enforces them) and `fips-guard stats`
-stays at zero. Run detection on the host — `deploy/host/install-fail2ban.sh`
-— if you want kernel enforcement. Details and the log-path wrinkle:
-[../docs/guide.md § 7](../docs/guide.md#7-optional-kernel-level-enforcement).
-
 `install-fail2ban.sh` and `make install` deliberately do not replace an
 already-installed guard wrapper; they put the file backend in
 `/usr/local/lib/fips-shield/shield-ban-file` instead. Check which
 backend is live with `head -3 /usr/local/bin/shield-ban`.
+
+### From the containerized fail2ban
+
+The detection sidecar can drive the guard too, so a container deployment
+gets kernel-level bans without moving fail2ban to the host.
+
+The state the guard enforces lives in **BPF maps pinned to bpffs**. Pins
+are filesystem objects, so any process that can open them may add or
+remove ban entries; the tc classifier on `fips0` reads those same maps on
+every packet. That is all the sidecar needs — it never loads a program
+and never touches the interface.
+
+```sh
+sudo make install-guard                       # host side, once
+sudo systemctl enable --now fips-guard
+cd deploy/container
+docker compose -f compose.yaml -f compose.guard.yaml up -d
+```
+
+The overlay adds three things to the sidecar, and nothing else changes —
+same jails, same filters, same action:
+
+- **`CAP_BPF`.** Map access needs it. `CAP_NET_ADMIN` is *not* required:
+  attaching the classifier (`fips-guard load`) stays on the host under
+  systemd, where `PartOf=fips.service` re-attaches it across daemon
+  restarts. The container keeps `network_mode: none`.
+- **The host's `fips-guard` and `shield-ban`, bind-mounted read-only.**
+  Mounting rather than baking them in means the container always runs
+  exactly the guard the host runs — no version skew between the process
+  writing the maps and the classifier reading them. It also means
+  removing the overlay silently reverts to the image's file backend.
+- **bpffs mounted at `/mnt/bpf`, not `/sys/fs/bpf`.** AppArmor's
+  `docker-default` profile denies writes under `/sys/**`, so pinning
+  through a `/sys` path fails with `EACCES`. The profile matches the
+  path *inside* the container, so mounting bpffs elsewhere works with
+  default AppArmor and default seccomp — no `--privileged`, no
+  `security-opt`. `SHIELD_GUARD_PIN_DIR` points the CLI at it.
+
+Because the image executes the host's binary, the sidecar is
+Debian-based: `fips-guard` links against glibc and cannot run on musl.
+
+`test/guard_sidecar_smoke.sh` covers this end to end — a privileged
+container stands in for the host and pins the maps, the real sidecar
+image bans and unbans through them, and the host's view is checked after
+each step. It also asserts the negative case: with `CAP_BPF` dropped the
+ban must fail, which is what proves the privilege is the thing doing the
+work.
+
+#### Choosing what enforces
+
+| | Enforced by | `shield-ban list` reads |
+|---|---|---|
+| sidecar alone | nginx, from the banlist file | the file |
+| **+ `compose.guard.yaml`** | the kernel, on `fips0` | the BPF maps |
+| + `SHIELD_BAN_ALSO_FILE=true` | both | the maps (the file is kept in step) |
+
+With the guard alone, banned traffic never reaches nginx, so the banlist
+file stays empty — that is expected, not a fault. Set
+`SHIELD_BAN_ALSO_FILE=true` if you want nginx to keep its own view as a
+fallback for when the guard is unloaded.
 
 Run `fips-guard load` at boot before the services it protects — a
 systemd unit example is in [../deploy/host/README.md](../deploy/host/README.md).

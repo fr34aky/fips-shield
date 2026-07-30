@@ -487,7 +487,8 @@ service on the mesh interface — including ones not behind the shield,
 like SSH on its own port. Linux only; needs root.
 
 ```sh
-make install-guard
+make guard                             # as you, not under sudo
+sudo make install-guard
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-guard
 ```
@@ -495,43 +496,23 @@ sudo systemctl enable --now fips-guard
 That installs `shield-ban` as the guard's wrapper, so a **host-mode**
 detection engine starts enforcing in the kernel with no other changes.
 
-> ⚠️ **The container-mode fail2ban sidecar cannot drive the guard.**
-> The sidecar image carries its own `/usr/local/bin/shield-ban` — the
-> banlist-file backend — and has no access to the host's bpffs, so it
-> writes bans to the shared banlist and never calls `fips-guard`. The
-> symptom is exactly this: `fail2ban-client banned` lists the node,
-> nginx rejects it at accept, and `fips-guard stats` reports `bans 0`
-> with zero drops. Enforcement is working, just at the nginx layer
-> rather than in the kernel.
->
-> To put the guard behind detection, run fail2ban on the host instead of
-> as a sidecar:
->
-> ```sh
-> docker compose stop fail2ban       # or remove it from compose.yaml
-> sudo deploy/host/install-fail2ban.sh shield.env
-> sudo fail2ban-client -t && sudo systemctl reload fail2ban
-> ```
->
-> Host fail2ban has to read the shield's logs, which live in the
-> `shield-logs` volume. Either bind-mount them to a host path in
-> `compose.yaml`:
->
-> ```yaml
->     volumes:
->       - /var/log/fips-shield:/var/log/nginx
-> ```
->
-> and set the jails' `logpath` accordingly, or point `logpath` at the
-> volume's own directory (`docker volume inspect <name>`), which is
-> workable but breaks if the volume is recreated.
->
-> Keeping the sidecar *and* using the guard would mean installing
-> `fips-guard` into that image, mounting `/sys/fs/bpf`, and granting
-> `CAP_BPF`+`CAP_NET_ADMIN`. Only the map-writing verbs are needed
-> (`load` stays on the host), but the sidecar is Alpine, so it would
-> need a musl build of the guard. Untested — the host-mode route above
-> is the supported one.
+In container mode, add the overlay that shares the guard's pinned maps
+with the detection sidecar, so fail2ban bans in the kernel instead of
+writing a banlist file:
+
+```sh
+docker compose -f compose.yaml -f compose.guard.yaml up -d
+```
+
+The sidecar gets `CAP_BPF` and the host's `fips-guard` bind-mounted; it
+keeps `network_mode: none` and needs no `CAP_NET_ADMIN`, because loading
+the classifier stays on the host. Full explanation in
+[../guard/README.md](../guard/README.md#from-the-containerized-fail2ban).
+
+Without that overlay the sidecar uses the banlist-file backend: bans are
+enforced by nginx at accept and mid-session, and `fips-guard stats` stays
+at zero because nothing calls the guard. That is working enforcement, not
+a fault — just not in the kernel.
 
 Verify the guard enforces at all, independently of detection:
 
@@ -576,10 +557,10 @@ consider adding it to `SHIELD_F2B_IGNOREIP`.
 **fail2ban reports the node banned, but `fips-guard stats` shows no
 drops.**
 Detection is not reaching the guard; the ban is being enforced by nginx
-instead. Two causes. In container mode, the fail2ban sidecar always uses
-the banlist-file backend and cannot see the host's BPF maps — see
-[§ 7](#7-optional-kernel-level-enforcement). In host mode, check which
-backend is installed:
+instead. Two causes. In container mode, the sidecar uses the
+banlist-file backend unless you started it with `compose.guard.yaml` —
+see [§ 7](#7-optional-kernel-level-enforcement). In host mode, check
+which backend is installed:
 
 ```sh
 head -3 /usr/local/bin/shield-ban     # "eBPF edition" = the guard

@@ -13,11 +13,17 @@
 # writes bans to the banlist (shared volume) via shield-ban; nginx
 # enforces them. No network, no docker socket.
 #
-# The sidecar drives the banlist-file backend only. It cannot reach the
-# host's bpffs, so the optional eBPF guard is NOT wired to detection in
-# this mode — bans are enforced by nginx, and `fips-guard stats` stays
-# at zero. For kernel enforcement, run fail2ban on the host instead
-# (deploy/host/install-fail2ban.sh); see docs/guide.md section 7.
+# By itself the sidecar drives the banlist-file backend: bans are
+# enforced by nginx at accept and mid-session, and `fips-guard stats`
+# stays at zero because nothing ever calls the guard.
+#
+# To have fail2ban ban in the kernel instead, install the guard on the
+# host and add the overlay, which shares its pinned maps with this
+# container:
+#
+#   docker compose -f compose.yaml -f compose.guard.yaml up -d
+#
+# See compose.guard.yaml and guard/README.md.
 
 services:
   shield:

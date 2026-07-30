@@ -47,7 +47,7 @@ else
     install -m 755 "$REPO_ROOT"/core/actions/shield-ban "$BAN_BIN"
 fi
 
-envsubst '${SHIELD_BAN_FILE}' \
+envsubst '${SHIELD_BAN_FILE} ${SHIELD_BAN_ALSO_FILE}' \
     < "$REPO_ROOT"/core/fail2ban/action.d/fips-shield.conf.template \
     > "$F2B_DIR/action.d/fips-shield.conf"
 
