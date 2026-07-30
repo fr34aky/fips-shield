@@ -63,6 +63,58 @@ done
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 
+# --------------------------------------------------------- prerequisites
+# Checked up front and reported together: failing halfway through leaves
+# a host with configs rendered but no detection engine, and the raw
+# error from a missing directory ("install: cannot stat ...") says
+# nothing about what to install.
+
+pkg_hint() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "apt install $1"
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "dnf install $1"
+    elif command -v pkg >/dev/null 2>&1; then
+        echo "pkg install $1"
+    elif command -v apk >/dev/null 2>&1; then
+        echo "apk add $1"
+    else
+        echo "install the $1 package"
+    fi
+}
+
+check_prereqs() {
+    local missing=()
+
+    command -v envsubst >/dev/null 2>&1 ||
+        missing+=("envsubst — $(pkg_hint gettext-base)")
+
+    # The jails, filters and banaction are installed into fail2ban's
+    # configuration tree; without fail2ban there is nothing to configure.
+    if ! command -v fail2ban-client >/dev/null 2>&1 &&
+        [ ! -d "${F2B_DIR:-/etc/fail2ban}" ]; then
+        missing+=("fail2ban — $(pkg_hint fail2ban)")
+    elif [ ! -d "${F2B_DIR:-/etc/fail2ban}" ]; then
+        missing+=("fail2ban's config directory ${F2B_DIR:-/etc/fail2ban} \
+(installed elsewhere? set F2B_DIR)")
+    fi
+
+    if [ "$RENDER_NGINX" = true ] && ! command -v nginx >/dev/null 2>&1; then
+        missing+=("nginx — $(pkg_hint nginx), plus the njs stream module
+      (see deploy/host/README.md); or use --no-nginx if it runs in a container")
+    fi
+
+    [ ${#missing[@]} -eq 0 ] && return 0
+
+    echo "error: missing prerequisites on this host:" >&2
+    printf '  - %s\n' "${missing[@]}" >&2
+    echo >&2
+    echo "Install them and re-run. Nothing has been changed." >&2
+    exit 1
+}
+
+check_prereqs
+
 # ---------------------------------------------------------------- guard
 # Decided before anything is installed, so a "no" needs no rollback and
 # the reasons appear before the noise of the install itself.

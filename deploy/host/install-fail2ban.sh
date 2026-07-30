@@ -28,6 +28,14 @@ while IFS= read -r line || [ -n "$line" ]; do
     case "$key" in [A-Za-z_]*) export "$key=${line#*=}" ;; esac
 done < "$ENV_FILE"
 
+if [ ! -d "$F2B_DIR/filter.d" ]; then
+    echo "error: $F2B_DIR/filter.d does not exist — is fail2ban installed?" >&2
+    echo "       Debian/Ubuntu: apt install fail2ban" >&2
+    echo "       FreeBSD:       pkg install py311-fail2ban" \
+        "(then F2B_DIR=/usr/local/etc/fail2ban)" >&2
+    exit 1
+fi
+
 install -m 644 "$REPO_ROOT"/core/fail2ban/filter.d/*.conf "$F2B_DIR/filter.d/"
 
 # The banlist backend always lands in the library directory, where the
