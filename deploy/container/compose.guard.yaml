@@ -31,19 +31,37 @@ services:
     # host under systemd, where PartOf=fips.service re-attaches it when
     # the daemon restarts. The container keeps network_mode: none from
     # the base compose file.
+    # Understand what this grants before enabling it: CAP_BPF is
+    # HOST-WIDE, not shield-scoped. It permits BPF_MAP_GET_NEXT_ID and
+    # BPF_MAP_GET_FD_BY_ID, so a process holding it can enumerate and
+    # open every BPF map on the machine — pinned or not, belonging to
+    # this project or not — for read and write. It is granted here to
+    # the one container whose whole job is running a regex engine over
+    # attacker-influenced log text, so the rest of this block exists to
+    # keep the blast radius of that container as small as it can be.
     cap_add:
       - BPF
     volumes:
       # The enforcement backend and its CLI, straight from the host.
       - /usr/local/bin/fips-guard:/usr/local/bin/fips-guard:ro
       - /usr/local/bin/shield-ban:/usr/local/bin/shield-ban:ro
-      # bpffs, deliberately NOT at /sys/fs/bpf: AppArmor's docker-default
-      # profile denies writes under /sys/**, which makes map creation
+      # Only the shield's own pin directory, and read-only. Mounting all
+      # of bpffs read-write let this container unlink ANY pin on the
+      # host, including every shield_* pin — silently discarding every
+      # active ban — and any other subsystem's.
+      #
+      # Read-only is not a restriction on banning: the inode permission
+      # check for updating a map element is against the superblock, not
+      # the mount, so ban and unban still work. What it blocks is
+      # creating and unlinking pins.
+      #
+      # Deliberately NOT at /sys/fs/bpf: AppArmor's docker-default
+      # profile denies writes under /sys/**, which makes map access
       # fail with EACCES. The path inside the container is what the
       # profile matches, so mounting it elsewhere works with default
       # AppArmor and default seccomp — no --privileged, no
       # security-opt overrides.
-      - /sys/fs/bpf:/mnt/bpf
+      - /sys/fs/bpf/fips-shield:/mnt/bpf/fips-shield:ro
     environment:
       # Must match the host's pin directory with /sys/fs/bpf rewritten to
       # the mount point above. The host default is /sys/fs/bpf/fips-shield.

@@ -43,9 +43,25 @@ services:
       dockerfile: deploy/container/Dockerfile.fail2ban
     network_mode: none
     env_file: shield.env
+    # This container parses attacker-influenced text (request lines,
+    # user agents, and the verdict "detail" field) with a regex engine,
+    # as root, and drives the enforcement backend. It needs no
+    # capabilities at all to do that, so it gets none — which also
+    # bounds what a fail2ban parsing bug could reach. The guard overlay
+    # adds CAP_BPF back on top; see compose.guard.yaml.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - shield-logs:/var/log/nginx
       - shield-bans:/var/lib/fips-shield
+      # fail2ban's own database. Without it, bantime.increment
+      # escalation and every live ticket are discarded on each
+      # "compose up --build", while the banlist keeps its entries —
+      # exactly the ticket/banlist desync docs/guide.md documents a
+      # manual recovery procedure for.
+      - shield-f2b-db:/var/lib/fail2ban
     restart: unless-stopped
 
   # Optional: run strfry itself as a container. Remove if strfry
@@ -63,4 +79,5 @@ services:
 volumes:
   shield-logs:
   shield-bans:
+  shield-f2b-db:
 #  strfry-db:

@@ -56,13 +56,24 @@ fail() {
 }
 
 # The sidecar, exactly as compose.guard.yaml configures it: no network,
-# CAP_BPF and nothing else, host binaries mounted read-only, bpffs at
-# /mnt/bpf rather than /sys/fs/bpf (AppArmor denies writes under /sys).
+# no capabilities but CAP_BPF, no-new-privileges, host binaries mounted
+# read-only, and ONLY the shield's own pin directory — read-only, and
+# at /mnt/bpf rather than /sys/fs/bpf (AppArmor denies writes under
+# /sys).
+#
+# The read-only pin mount is load-bearing and is why this test matters:
+# it must still permit ban and unban, because updating a map element is
+# checked against the map inode's own permissions rather than the mount
+# flags, while blocking the container from unlinking pins. If a kernel
+# or runtime change ever made :ro block element updates too, every
+# assertion below would fail rather than the sidecar silently losing
+# the ability to enforce.
 sidecar() {
-    docker run --rm --network none --cap-add BPF \
+    docker run --rm --network none --cap-drop ALL --cap-add BPF \
+        --security-opt no-new-privileges:true \
         -v "$BIN":/usr/local/bin/fips-guard:ro \
         -v "$WRAPPER":/usr/local/bin/shield-ban:ro \
-        -v /sys/fs/bpf:/mnt/bpf \
+        -v "/sys/fs/bpf/$PIN_NAME":"/mnt/bpf/$PIN_NAME":ro \
         -e SHIELD_GUARD_PIN_DIR="/mnt/bpf/$PIN_NAME" \
         "$F2B_IMAGE" "$@"
 }

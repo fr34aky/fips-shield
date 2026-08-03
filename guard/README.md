@@ -200,17 +200,44 @@ same jails, same filters, same action:
   attaching the classifier (`fips-guard load`) stays on the host under
   systemd, where `PartOf=fips.service` re-attaches it across daemon
   restarts. The container keeps `network_mode: none`.
+
+  Know what this grants before you enable it. **`CAP_BPF` is host-wide,
+  not shield-scoped.** It permits `BPF_MAP_GET_NEXT_ID` and
+  `BPF_MAP_GET_FD_BY_ID`, so a process holding it can enumerate and
+  open *every* BPF map on the machine — pinned or not, belonging to
+  this project or not — for read and write. You are granting that to
+  the container whose job is running a regex engine over
+  attacker-influenced log text. The rest of the overlay exists to keep
+  that container's blast radius small: it runs with `cap_drop: ALL`
+  plus `CAP_BPF` alone, `no-new-privileges`, and no network. If you are
+  not comfortable with the grant, use the file backend — the jails and
+  filters are identical either way.
 - **The host's `fips-guard` and `shield-ban`, bind-mounted read-only.**
   Mounting rather than baking them in means the container always runs
   exactly the guard the host runs — no version skew between the process
   writing the maps and the classifier reading them. It also means
   removing the overlay silently reverts to the image's file backend.
-- **bpffs mounted at `/mnt/bpf`, not `/sys/fs/bpf`.** AppArmor's
-  `docker-default` profile denies writes under `/sys/**`, so pinning
-  through a `/sys` path fails with `EACCES`. The profile matches the
-  path *inside* the container, so mounting bpffs elsewhere works with
-  default AppArmor and default seccomp — no `--privileged`, no
-  `security-opt`. `SHIELD_GUARD_PIN_DIR` points the CLI at it.
+- **The pin directory alone, read-only, at `/mnt/bpf/fips-shield`.**
+  Two deliberate narrowings from "mount bpffs":
+
+  Only `/sys/fs/bpf/fips-shield`, not all of `/sys/fs/bpf`: the latter
+  let the sidecar unlink *any* pin on the host, including every
+  `shield_*` pin — which silently discards every active ban — and any
+  other subsystem's.
+
+  Read-only, because it costs nothing: updating a map element is
+  checked against the map inode's own permissions, not the mount flags,
+  so ban and unban still work while creating and unlinking pins does
+  not. `test/guard_sidecar_smoke.sh` runs the sidecar in exactly this
+  configuration and asserts bans still reach the kernel, so the claim
+  is tested rather than assumed.
+
+  And `/mnt/bpf` rather than `/sys/fs/bpf`, because AppArmor's
+  `docker-default` profile denies writes under `/sys/**` and matches
+  the path *inside* the container — so mounting elsewhere works with
+  default AppArmor and default seccomp, no `--privileged` and no
+  `security-opt` overrides. `SHIELD_GUARD_PIN_DIR` points the CLI at
+  it.
 
 Because the image executes the host's binary, the sidecar is
 Debian-based: `fips-guard` links against glibc and cannot run on musl.
