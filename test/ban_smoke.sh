@@ -98,5 +98,45 @@ if [ "$banned" -ne 1 ]; then
     exit 1
 fi
 py expect-reject
+fban unban ::1 >/dev/null
+
+# Regression: fail2ban's permanent ban is bantime = -1, which reaches
+# the backend as "ban <ip> -1". That used to compute an expiry one
+# second in the PAST, report success, and enforce nothing — while the
+# eBPF backend treated the same input as permanent. Both backends now
+# store 0 and never expire it.
+echo "--- permanent ban (bantime = -1) is actually enforced"
+fban ban ::1 -1 >/dev/null
+if ! fban check ::1 | grep -q permanently; then
+    echo "error: permanent ban not reported as banned" >&2
+    fban check ::1 >&2 || true
+    exit 1
+fi
+if ! fban list | grep -q '^::1 0$'; then
+    echo "error: permanent ban not stored as 0 in the banlist" >&2
+    fban list >&2 || true
+    exit 1
+fi
+py expect-reject
+fban unban ::1 >/dev/null
+py benign
+
+# Regression: expiry itself was untested — deleting the reader-side
+# comparison used to leave every test passing.
+echo "--- a ban expires on its own and service returns"
+fban ban ::1 2 >/dev/null
+py expect-reject
+sleep 3
+if fban check ::1 >/dev/null 2>&1; then
+    echo "error: ban did not expire" >&2
+    exit 1
+fi
+py benign
+
+echo "--- a non-integer ttl is refused, not evaluated"
+if fban ban ::1 'PATH[$(id)]' >/dev/null 2>&1; then
+    echo "error: backend accepted a non-integer ttl" >&2
+    exit 1
+fi
 
 echo "OK"

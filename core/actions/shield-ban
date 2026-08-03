@@ -33,8 +33,11 @@ usage() {
 
 active_entries() {
     # Prints unexpired entries; missing file is an empty list.
+    # "until" 0 means permanent (fail2ban's bantime = -1) and never
+    # expires — the eBPF backend has always read a non-positive ttl that
+    # way, and the two backends must agree.
     [ -f "$BAN_FILE" ] || return 0
-    awk -v now="$(date +%s)" 'NF >= 2 && $2 > now' "$BAN_FILE"
+    awk -v now="$(date +%s)" 'NF >= 2 && ($2 == 0 || $2 > now)' "$BAN_FILE"
 }
 
 rewrite() {
@@ -52,12 +55,31 @@ case "$cmd" in
 ban)
     ip="${2:?usage: shield-ban ban <ip> <seconds>}"
     ttl="${3:?usage: shield-ban ban <ip> <seconds>}"
-    until=$(( $(date +%s) + ttl ))
+    # Validate before any arithmetic: a bare variable inside $(( )) is
+    # re-evaluated as an expression, and bash runs command substitution
+    # while expanding array subscripts, so an unchecked ttl is a code
+    # execution gadget in a script that runs as root on every ban.
+    case "$ttl" in
+    ''|-|*[!0-9-]*|?*-*)
+        echo "shield-ban: seconds must be an integer, got '$ttl'" >&2
+        exit 2
+        ;;
+    esac
+    if [ "$ttl" -le 0 ]; then
+        # fail2ban's permanent ban. Stored as 0, which never expires.
+        until=0
+    else
+        until=$(( $(date +%s) + ttl ))
+    fi
     mkdir -p "$(dirname "$BAN_FILE")"
     exec 9> "$LOCK_FILE"
     flock -x 9
     { active_entries | awk -v ip="$ip" '$1 != ip'; echo "$ip $until"; } | rewrite
-    echo "banned $ip until $until"
+    if [ "$until" = 0 ]; then
+        echo "banned $ip permanently"
+    else
+        echo "banned $ip until $until"
+    fi
     ;;
 unban)
     ip="${2:?usage: shield-ban unban <ip>}"
@@ -71,7 +93,11 @@ check)
     ip="${2:?usage: shield-ban check <ip>}"
     until="$(active_entries | awk -v ip="$ip" '$1 == ip {print $2}')"
     if [ -n "$until" ]; then
-        echo "banned $ip until $until"
+        if [ "$until" = 0 ]; then
+            echo "banned $ip permanently"
+        else
+            echo "banned $ip until $until"
+        fi
         exit 0
     fi
     echo "not banned $ip"

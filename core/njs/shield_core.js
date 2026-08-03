@@ -20,7 +20,11 @@
 
 import fs from 'fs';
 
-var banCache = { path: '', mtime: 0, size: -1, map: {} };
+// map is Object.create(null) throughout: it is indexed by a client
+// address, and on a plain object an inherited name like "constructor"
+// answers with a function, which the isNaN() fail-closed check in
+// isBanned() would then read as a ban.
+var banCache = { path: '', mtime: 0, size: -1, map: Object.create(null) };
 
 function num(v, dflt) {
     var n = parseFloat(v);
@@ -55,7 +59,7 @@ function loadBans(path) {
         banCache.path = path;
         banCache.mtime = 0;
         banCache.size = -1;
-        banCache.map = {};
+        banCache.map = Object.create(null);
         return banCache.map;
     }
     var mtime = st.mtimeMs !== undefined ? st.mtimeMs : Number(st.mtime);
@@ -63,7 +67,7 @@ function loadBans(path) {
         banCache.size === st.size) {
         return banCache.map;
     }
-    var map = {};
+    var map = Object.create(null);
     try {
         var lines = fs.readFileSync(path, 'utf8').split('\n');
         for (var i = 0; i < lines.length; i++) {
@@ -88,8 +92,19 @@ function isBanned(ip, path) {
         return false;
     }
     var until = loadBans(path)[ip];
-    // Expiry is honoured here too, so a stale file cannot extend a ban.
-    return until !== undefined && until * 1000 > Date.now();
+    if (until === undefined) {
+        return false;
+    }
+    // A corrupt expiry must not read as "not banned": parseInt yields
+    // NaN, and every comparison against NaN is false, so the old code
+    // silently unbanned anyone whose line got mangled. Fail closed.
+    if (isNaN(until)) {
+        return true;
+    }
+    // 0 is a permanent ban (fail2ban's bantime = -1, written as 0 by
+    // the backend). Otherwise expiry is honoured here too, so a stale
+    // file cannot extend a ban past its "until".
+    return until === 0 || until * 1000 > Date.now();
 }
 
 // "shield-verdict" is the grep anchor for the detection engine; keep
