@@ -35,3 +35,6 @@
 - **[Code review, July 2026](review-2026-07.md)** — what the review
   found, what was fixed, the medium/low items still open, and the
   things verified as correct so they need not be re-litigated.
+- **[Code review, August 2026](review-2026-08.md)** — a second pass,
+  focused on cost rather than bypasses: what a node can spend inside
+  the limits without ever being detected. All items open.

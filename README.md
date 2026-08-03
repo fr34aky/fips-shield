@@ -236,3 +236,8 @@ The roadmap in [docs/plan.md](docs/plan.md) is complete; see its
 (July 2026) is written up in
 [docs/review-2026-07.md](docs/review-2026-07.md): all critical and high
 findings are fixed, with the remaining medium/low items listed there.
+A second review (August 2026),
+[docs/review-2026-08.md](docs/review-2026-08.md), looks at cost rather
+than bypasses — what a node can spend while staying inside every
+configured limit, and therefore without ever being detected. Its
+findings are all open.
