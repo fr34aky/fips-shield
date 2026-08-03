@@ -83,6 +83,11 @@ function readCfg(s) {
         maxSubs: num(p.ws_max_subs, 20),
         maxFilters: num(p.ws_max_filters, 10),
         maxFilterItems: num(p.ws_max_filter_items, 500),
+        maxLimit: num(p.ws_max_limit, 5000),
+        maxFilterValue: num(p.ws_max_filter_value, 512),
+        // Strict unless explicitly disabled: an absent knob must not
+        // silently mean "allow unbounded queries".
+        requireNarrowing: p.ws_require_narrowing !== 'false',
         maxHsReads: num(p.ws_max_hs_reads, DEFAULT_MAX_HS_READS),
         // Scaled off the message-size cap so raising one does not
         // silently start cutting legitimate large messages.
@@ -95,6 +100,83 @@ function readCfg(s) {
         types: keyset(p.nostr_types, DEFAULT_TYPES),
         kindDeny: keyset(p.nostr_kind_deny, '')
     };
+}
+
+// Keys that constrain which events a filter selects. A filter carrying
+// none of them asks the relay for everything it has — and the
+// item-count metric scores that ZERO, because it measures how
+// enumerated a query is, not how selective. The list is deliberately
+// generous (every standard NIP-01 selector, NIP-50 search, and any
+// "#x" tag filter), so the only thing it rejects is a filter that
+// narrows nothing at all.
+var NARROWING = ['ids', 'authors', 'kinds', 'since', 'until', 'search'];
+
+function isNarrowing(ks) {
+    for (var i = 0; i < ks.length; i++) {
+        if (ks[i].charAt(0) === '#' || NARROWING.indexOf(ks[i]) >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Shared by REQ, COUNT and NEG-OPEN. Returns true when it has closed
+// the session, in which case the caller must stop immediately.
+function checkFilters(s, cfg, st, filters) {
+    var nFilters = filters.length;
+    if (nFilters < 1) {
+        violate(s, cfg, st, 'filter-complexity', 'no-filter');
+        return true;
+    }
+    if (nFilters > cfg.maxFilters) {
+        violate(s, cfg, st, 'filter-complexity', 'filters=' + nFilters);
+        return true;
+    }
+    var items = 0;
+    for (var i = 0; i < nFilters; i++) {
+        var f = filters[i];
+        if (typeof f !== 'object' || f === null || Array.isArray(f)) {
+            violate(s, cfg, st, 'malformed', 'bad-filter');
+            return true;
+        }
+        var ks = Object.keys(f);
+        if (cfg.requireNarrowing && !isNarrowing(ks)) {
+            violate(s, cfg, st, 'filter-complexity', 'unbounded-filter');
+            return true;
+        }
+        // "limit" was never inspected at any value, so one message
+        // could ask for ten million events and score three items.
+        if (typeof f.limit === 'number' && f.limit > cfg.maxLimit) {
+            violate(s, cfg, st, 'filter-complexity', 'limit=' + f.limit);
+            return true;
+        }
+        items += ks.length;
+        for (var k = 0; k < ks.length; k++) {
+            var v = f[ks[k]];
+            if (Array.isArray(v)) {
+                items += v.length;
+                for (var j = 0; j < v.length; j++) {
+                    if (typeof v[j] === 'string' &&
+                        v[j].length > cfg.maxFilterValue) {
+                        violate(s, cfg, st, 'filter-complexity',
+                                'value-len=' + v[j].length);
+                        return true;
+                    }
+                }
+            } else if (typeof v === 'string' &&
+                       v.length > cfg.maxFilterValue) {
+                // A 100 KB "search" term is one key and one item.
+                violate(s, cfg, st, 'filter-complexity',
+                        'value-len=' + v.length);
+                return true;
+            }
+        }
+    }
+    if (items > cfg.maxFilterItems) {
+        violate(s, cfg, st, 'filter-complexity', 'items=' + items);
+        return true;
+    }
+    return false;
 }
 
 function bucket(rate, burst) {
@@ -239,26 +321,8 @@ function inspect(s, cfg, st, buf) {
         if (typeof sid !== 'string' || sid.length < 1 || sid.length > 64) {
             return violate(s, cfg, st, 'malformed', 'bad-subscription-id');
         }
-        var nFilters = msg.length - 2;
-        if (nFilters > cfg.maxFilters) {
-            return violate(s, cfg, st, 'filter-complexity', 'filters=' + nFilters);
-        }
-        var items = 0;
-        for (var i = 2; i < msg.length; i++) {
-            var f = msg[i];
-            if (typeof f !== 'object' || f === null || Array.isArray(f)) {
-                return violate(s, cfg, st, 'malformed', 'bad-filter');
-            }
-            var ks = Object.keys(f);
-            items += ks.length;
-            for (var k = 0; k < ks.length; k++) {
-                if (Array.isArray(f[ks[k]])) {
-                    items += f[ks[k]].length;
-                }
-            }
-        }
-        if (items > cfg.maxFilterItems) {
-            return violate(s, cfg, st, 'filter-complexity', 'items=' + items);
+        if (checkFilters(s, cfg, st, msg.slice(2))) {
+            return;
         }
         if (t === 'REQ' && !(sid in st.subs)) {
             if (st.subCount >= cfg.maxSubs) {
@@ -267,7 +331,36 @@ function inspect(s, cfg, st, buf) {
             st.subs[sid] = true;
             st.subCount++;
         }
-    } else if (t === 'CLOSE') {
+    } else if (t === 'NEG-OPEN') {
+        // Negentropy reconciliation is the most expensive operation the
+        // relay offers, and NEG-OPEN carries a filter in msg[2]. It
+        // used to fall through to the general message bucket with no
+        // filter inspection and no subscription accounting whatsoever —
+        // the query-cost model simply did not apply to it.
+        if (!takeToken(cfg.bReq)) {
+            return violate(s, cfg, st, 'req-rate');
+        }
+        var nsid = msg[1];
+        if (typeof nsid !== 'string' || nsid.length < 1 || nsid.length > 64) {
+            return violate(s, cfg, st, 'malformed', 'bad-subscription-id');
+        }
+        if (checkFilters(s, cfg, st, [msg[2]])) {
+            return;
+        }
+        if (!(nsid in st.subs)) {
+            if (st.subCount >= cfg.maxSubs) {
+                return violate(s, cfg, st, 'too-many-subs', 'max=' + cfg.maxSubs);
+            }
+            st.subs[nsid] = true;
+            st.subCount++;
+        }
+    } else if (t === 'AUTH') {
+        // Costs the relay a schnorr verification, so price it like a
+        // publish rather than under the loose message bucket.
+        if (!takeToken(cfg.bEvent)) {
+            return violate(s, cfg, st, 'event-rate');
+        }
+    } else if (t === 'CLOSE' || t === 'NEG-CLOSE') {
         if (typeof msg[1] === 'string' && msg[1] in st.subs) {
             delete st.subs[msg[1]];
             if (st.subCount > 0) {
@@ -275,7 +368,8 @@ function inspect(s, cfg, st, buf) {
             }
         }
     }
-    // AUTH and NEG-* pass under the overall message-rate bucket.
+    // NEG-MSG passes under the overall message-rate bucket: it carries
+    // reconciliation payload for a session NEG-OPEN already accounted.
 }
 
 // Parse as many complete frames out of st.acc as available. Data

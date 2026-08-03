@@ -70,5 +70,7 @@ echo "--- prototype keys must not defeat the caps"
 run_probe proto_probe.py
 echo "--- slow-drip must not buy unbounded inspection CPU"
 run_probe drip_probe.py
+echo "--- query cost must be bounded, not just query shape"
+run_probe filter_probe.py
 
 echo "OK"

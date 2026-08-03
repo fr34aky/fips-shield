@@ -30,7 +30,13 @@ fields append at the end.
 Rules emitted by the `ws` layer: `protocol`, `binary-frame`,
 `oversized-handshake`, `oversized-message`, `malformed`,
 `type-not-allowed`, `kind-denied`, `msg-rate`, `event-rate`,
-`req-rate`, `filter-complexity`, `too-many-subs`, `engine-error`.
+`req-rate`, `filter-complexity`, `too-many-subs`, `frame-flood`,
+`engine-error`.
+
+The `access` layer emits `conn-rate` (per-node connection rate
+exceeded). It is a much weaker signal than a `ws` violation — a
+reconnect loop reaches it without malice — so it has its own jail and
+threshold rather than sharing the message-violation one.
 
 Rule `banned` (layers `ws`/`ban`) is an **enforcement echo** — an
 already-banned source getting rejected or cut. Detection filters must
