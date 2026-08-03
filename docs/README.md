@@ -1,9 +1,15 @@
 # fips-shield documentation
 
-**New here? Start with the [user guide](guide.md).**
+**New here? Start with the [quick start](quickstart.md)** — one page,
+one to three edited config lines, from nothing to a protected service.
+Read the [user guide](guide.md) when you want to know why any of it
+works.
 
 ### Using it
 
+- **[Quick start](quickstart.md)** — the shortest path that works, for
+  each profile and for combinations, plus enabling the eBPF guard on
+  Debian and what to change when upgrading.
 - **[User guide](guide.md)** — what it protects against, how to install
   and run it (containers or host), every configuration option, and how
   to operate it day to day.
