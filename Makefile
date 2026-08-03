@@ -87,4 +87,9 @@ install-guard: ## install the eBPF guard and its systemd unit (run `make guard` 
 	install -d $(PREFIX)/lib/fips-shield
 	install -m 755 core/actions/shield-ban $(PREFIX)/lib/fips-shield/shield-ban-file
 	install -m 644 deploy/host/fips-guard.service /etc/systemd/system/
+	install -m 644 deploy/host/fips-guard-watchdog.service /etc/systemd/system/
+	install -m 644 deploy/host/fips-guard-watchdog.timer /etc/systemd/system/
 	@echo "now: systemctl daemon-reload && systemctl enable --now fips-guard"
+	@echo "     systemctl enable --now fips-guard-watchdog.timer"
+	@echo "     (the timer re-attaches the classifier if it goes missing;"
+	@echo "      without it, a detached filter is never noticed)"

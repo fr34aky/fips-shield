@@ -27,7 +27,7 @@ BAN_FILE="${SHIELD_BAN_FILE:-/var/lib/fips-shield/banlist}"
 LOCK_FILE="$BAN_FILE.lock"
 
 usage() {
-    echo "usage: shield-ban ban <ip> <seconds> | unban <ip> | check <ip> | list" >&2
+    echo "usage: shield-ban ban <ip> <seconds> | unban <ip> | check <ip> | list | health" >&2
     exit 2
 }
 
@@ -105,6 +105,24 @@ check)
     ;;
 list)
     active_entries
+    ;;
+health)
+    # Cheap liveness check for fail2ban's actioncheck, which was empty —
+    # and an empty actioncheck disables fail2ban's self-healing. When it
+    # fails, fail2ban invalidates its ban epoch and re-applies every live
+    # ticket, which repopulates the banlist after a lost volume or a
+    # tmpfs reboot. For this backend "working" means: the directory
+    # exists and we can write there.
+    dir="$(dirname "$BAN_FILE")"
+    if [ ! -d "$dir" ]; then
+        echo "banlist directory $dir does not exist" >&2
+        exit 1
+    fi
+    if [ ! -w "$dir" ]; then
+        echo "banlist directory $dir is not writable" >&2
+        exit 1
+    fi
+    echo "ok: $dir is writable"
     ;;
 *)
     usage

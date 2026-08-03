@@ -111,6 +111,24 @@ enum Cmd {
     Throttle { rate: u64, burst: u64 },
     /// Packet counters and current configuration.
     Stats,
+    /// Report whether the classifier is still attached. Exit 1 if not.
+    Status {
+        #[arg(long, env = "SHIELD_GUARD_IFACE", default_value = DEFAULT_IFACE)]
+        iface: String,
+    },
+    /// Verify the attachment, re-attach if it is missing, and refresh
+    /// the heartbeat. Intended for fips-guard-watchdog.timer.
+    Watchdog {
+        #[arg(long, env = "SHIELD_GUARD_IFACE", default_value = DEFAULT_IFACE)]
+        iface: String,
+    },
+    /// Exit 1 if the watchdog heartbeat is missing or stale. Reads only
+    /// the pinned map, so it works from the detection sidecar, which
+    /// has no network namespace of its own.
+    Health {
+        #[arg(long, env = "SHIELD_GUARD_MAX_AGE", default_value_t = 180)]
+        max_age: u64,
+    },
 }
 
 fn now_mono_ns() -> u64 {
@@ -156,6 +174,117 @@ fn bans_map(pin_dir: &Path) -> Result<BpfHashMap<MapData, Addr6, BanVal>> {
         pin_dir,
         "shield_bans",
     )?))?)
+}
+
+fn health_map(pin_dir: &Path) -> Result<Array<MapData, u64>> {
+    Ok(Array::try_from(Map::Array(open_map(
+        pin_dir,
+        "shield_health",
+    )?))?)
+}
+
+/// Is our classifier still attached to `iface`?
+///
+/// This shells out to `tc` rather than dumping RTM_GETTFILTER over
+/// netlink ourselves. aya keeps its filter-lookup helper private
+/// (`qdisc_detach_program` uses it, but calling that as a probe would
+/// detach the very filter we are testing for), and hand-rolling the
+/// dump means ~200 lines of unsafe struct punning — `tcmsg` and the
+/// TCA_* constants are not in the libc crate — for something that runs
+/// once a minute on the host, outside the packet path. iproute2 is
+/// already required to have a mesh interface at all.
+///
+/// No shell is involved: arguments are passed as a vector, so there is
+/// no quoting or injection surface. Keeping this in one function means
+/// swapping in a netlink implementation later touches nothing else.
+fn classifier_attached(iface: &str) -> Result<bool> {
+    let out = std::process::Command::new("tc")
+        .args(["filter", "show", "dev", iface, "ingress"])
+        .output()
+        .context("cannot run `tc` (install iproute2) to check the attachment")?;
+    if !out.status.success() {
+        bail!(
+            "tc filter show dev {iface} ingress failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).contains(PROG_NAME))
+}
+
+fn write_heartbeat(pin_dir: &Path) -> Result<()> {
+    health_map(pin_dir)?
+        .set(0, now_epoch_s(), 0)
+        .context("cannot write the health heartbeat")?;
+    Ok(())
+}
+
+fn cmd_status(pin_dir: &Path, iface: &str) -> Result<bool> {
+    let attached = classifier_attached(iface)?;
+    if attached {
+        // Refresh the heartbeat so a manual run counts as a check.
+        let _ = write_heartbeat(pin_dir);
+        println!("attached: {PROG_NAME} is filtering ingress on {iface}");
+    } else {
+        // Deliberately loud. The failure this catches is one where
+        // everything else keeps looking healthy: the pinned maps
+        // outlive the filter, so `check` still answers "banned" and
+        // `list` still lists, while nothing is being dropped.
+        println!(
+            "NOT ATTACHED: no {PROG_NAME} filter on {iface} ingress — nothing is being enforced"
+        );
+    }
+    Ok(attached)
+}
+
+/// Check, repair if needed, then publish the heartbeat.
+///
+/// Repairing rather than only reporting is the point: the unit that
+/// loads the guard is Type=oneshot with RemainAfterExit, so its
+/// `Restart=on-failure` can never fire — there is no process to
+/// restart. Something has to notice and re-attach.
+fn cmd_watchdog(pin_dir: &Path, iface: &str) -> Result<()> {
+    if classifier_attached(iface)? {
+        write_heartbeat(pin_dir)?;
+        return Ok(());
+    }
+    eprintln!("watchdog: {PROG_NAME} is not attached to {iface}; re-attaching");
+
+    // Preserve the running throttle configuration across the reload.
+    // cmd_load() would otherwise reset it to the CLI defaults, quietly
+    // disabling a configured throttle every time the watchdog repairs.
+    let cfg = config_map(pin_dir)
+        .and_then(|m| Ok(m.get(&0, 0)?))
+        .unwrap_or(Config {
+            rate_pps: 0,
+            burst_pkts: 0,
+        });
+    cmd_load(pin_dir, iface, cfg.rate_pps, cfg.burst_pkts)?;
+
+    if !classifier_attached(iface)? {
+        bail!("re-attach to {iface} reported success but no filter is present");
+    }
+    write_heartbeat(pin_dir)?;
+    eprintln!("watchdog: re-attached to {iface}");
+    Ok(())
+}
+
+/// Staleness check against the heartbeat map only — no interface, no
+/// network namespace, no capabilities beyond map access. That is what
+/// makes it callable from the detection sidecar, which has neither a
+/// network nor a view of the mesh interface.
+fn cmd_health(pin_dir: &Path, max_age: u64) -> Result<bool> {
+    let last = health_map(pin_dir)?.get(&0, 0).unwrap_or(0);
+    if last == 0 {
+        println!("unknown: no heartbeat yet (is fips-guard-watchdog.timer running?)");
+        return Ok(false);
+    }
+    let age = now_epoch_s().saturating_sub(last);
+    if age > max_age {
+        println!("stale: last confirmed {age}s ago (limit {max_age}s) — enforcement is not known to be running");
+        return Ok(false);
+    }
+    println!("ok: attachment confirmed {age}s ago");
+    Ok(true)
 }
 
 fn config_map(pin_dir: &Path) -> Result<Array<MapData, Config>> {
@@ -470,6 +599,18 @@ fn main() -> ExitCode {
             }
         }),
         Cmd::Stats => cmd_stats(pin_dir),
+        // status and health report through the exit code, like check.
+        Cmd::Status { iface } => match cmd_status(pin_dir, iface) {
+            Ok(true) => return ExitCode::SUCCESS,
+            Ok(false) => return ExitCode::FAILURE,
+            Err(e) => Err(e),
+        },
+        Cmd::Watchdog { iface } => cmd_watchdog(pin_dir, iface),
+        Cmd::Health { max_age } => match cmd_health(pin_dir, *max_age) {
+            Ok(true) => return ExitCode::SUCCESS,
+            Ok(false) => return ExitCode::FAILURE,
+            Err(e) => Err(e),
+        },
     };
 
     match result {
