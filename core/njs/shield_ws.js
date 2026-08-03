@@ -58,6 +58,18 @@ var DEFAULT_TYPES = 'EVENT,REQ,CLOSE,COUNT,AUTH,NEG-OPEN,NEG-MSG,NEG-CLOSE';
 var MAX_PENDING_FRAMES = 256;
 var MAX_FRAGMENTS = 64;
 
+// Reads, not bytes, are what this engine costs: every filter callback
+// pays interpreter overhead, and the attacker picks the segment size.
+// A byte-at-a-time handshake is ~300us of worker CPU per byte — three
+// orders of magnitude above the same traffic through a profile with no
+// js_filter — and stays under every byte-denominated cap, so nothing
+// used to notice. Capping reads per phase bounds the cost AND emits a
+// verdict, which is what lets the detection engine ban the source.
+// A conforming client needs one or two reads for a handshake; a 128 KB
+// message arrives in ~90 segments at a typical MSS.
+var DEFAULT_MAX_HS_READS = 32;
+var MIN_MSG_READS = 64;
+
 // All knobs come from the port-keyed policy string (see
 // core/njs/shield_core.js): per-server js_var values are global by
 // name in nginx and would leak between profiles.
@@ -71,6 +83,12 @@ function readCfg(s) {
         maxSubs: num(p.ws_max_subs, 20),
         maxFilters: num(p.ws_max_filters, 10),
         maxFilterItems: num(p.ws_max_filter_items, 500),
+        maxHsReads: num(p.ws_max_hs_reads, DEFAULT_MAX_HS_READS),
+        // Scaled off the message-size cap so raising one does not
+        // silently start cutting legitimate large messages.
+        maxMsgReads: num(p.ws_max_msg_reads,
+                         Math.ceil(num(p.ws_max_msg, 131072) / 1024) +
+                         MIN_MSG_READS),
         bMsg: bucket(num(p.ws_msg_rate, 20), num(p.ws_msg_burst, 100)),
         bEvent: bucket(num(p.ws_event_rate, 5), num(p.ws_event_burst, 50)),
         bReq: bucket(num(p.ws_req_rate, 5), num(p.ws_req_burst, 20)),
@@ -99,8 +117,13 @@ function takeToken(b) {
 // recognised — not to accept them, but so a bare-LF request is
 // detected here instead of being forwarded uninspected while this
 // sniffer waits forever for a CRLF pair that never comes.
-function headerBlockEnd(buf) {
-    for (var i = 0; i + 1 < buf.length; i++) {
+// `from` lets the caller skip bytes already scanned on earlier reads:
+// rescanning the whole buffer every time made a byte-at-a-time
+// handshake quadratic on top of the per-read cost. Callers must start
+// two bytes back so a "\n\r\n" terminator split across reads is still
+// found.
+function headerBlockEnd(buf, from) {
+    for (var i = from || 0; i + 1 < buf.length; i++) {
         if (buf[i] !== 0x0a) {
             continue;
         }
@@ -158,6 +181,8 @@ function violate(s, cfg, st, rule, detail) {
     st.killed = true;
     st.pending = [];
     st.msgParts = [];
+    st.chunks = [];
+    st.pendingLen = 0;
     core.verdict(s, cfg.service, 'ws', rule, detail);
     var notice = JSON.stringify(['NOTICE', 'fips-shield: connection closed: ' + rule]);
     s.sendDownstream(wsFrame(OP_TEXT, Buffer.from(notice), false));
@@ -259,7 +284,10 @@ function inspect(s, cfg, st, buf) {
 function pump(s, cfg, st) {
     while (!st.killed) {
         var acc = st.acc;
+        // Every "wait for more" exit records what it is waiting for, so
+        // onData() can buffer segments without re-concatenating.
         if (acc.length < 2) {
+            st.need = 2;
             return;
         }
         var b0 = acc[0];
@@ -276,12 +304,14 @@ function pump(s, cfg, st) {
         var off = 2;
         if (len === 126) {
             if (acc.length < 4) {
+                st.need = 4;
                 return;
             }
             len = acc.readUInt16BE(2);
             off = 4;
         } else if (len === 127) {
             if (acc.length < 10) {
+                st.need = 10;
                 return;
             }
             if (acc.readUInt32BE(2) !== 0) {
@@ -314,8 +344,10 @@ function pump(s, cfg, st) {
         }
         var end = off + 4 + len;
         if (acc.length < end) {
+            st.need = end;
             return;
         }
+        st.need = 2;
         var raw = acc.slice(0, end);
         var key = acc.slice(off, off + 4);
         var payload = Buffer.from(acc.slice(off + 4, end));
@@ -346,6 +378,9 @@ function pump(s, cfg, st) {
                 var msgBuf = Buffer.concat(st.msgParts);
                 st.msgParts = [];
                 st.msgLen = 0;
+                // The read budget is per message, not per connection:
+                // a long-lived client sending many messages is fine.
+                st.msgReads = 0;
                 inspect(s, cfg, st, msgBuf);
                 if (!st.killed) {
                     flush(s, st);
@@ -376,6 +411,13 @@ function onData(s, cfg, st, data, flags) {
     }
     if (st.mode === 'handshake') {
         if (data.length > 0) {
+            // Priced in reads, not bytes: see the note on
+            // DEFAULT_MAX_HS_READS. This is the cap that turns a
+            // byte-at-a-time drip from an unbounded, undetectable CPU
+            // sink into a verdict the detection engine can ban on.
+            if (++st.hsReads > cfg.maxHsReads) {
+                return violate(s, cfg, st, 'protocol', 'handshake-drip');
+            }
             st.hs = Buffer.concat([st.hs, data]);
             if (st.hs.length > MAX_HANDSHAKE) {
                 return violate(s, cfg, st, 'oversized-handshake');
@@ -384,7 +426,8 @@ function onData(s, cfg, st, data, flags) {
             // been seen and validated: forwarding a partial handshake
             // would let the http stage act on bytes this sniffer has
             // not classified yet.
-            var end = headerBlockEnd(st.hs);
+            var end = headerBlockEnd(st.hs, st.hsScanned - 2);
+            st.hsScanned = st.hs.length;
             if (end < 0) {
                 return;
             }
@@ -418,7 +461,25 @@ function onData(s, cfg, st, data, flags) {
             }
         }
     } else if (data.length > 0) {
-        st.acc = Buffer.concat([st.acc, data]);
+        if (++st.msgReads > cfg.maxMsgReads) {
+            return violate(s, cfg, st, 'frame-flood', 'message-drip');
+        }
+        // Hold arriving segments unmaterialised until there are enough
+        // bytes for pump() to make progress. Rebuilding the whole
+        // accumulator on every read copied the entire pending frame
+        // each time, so a byte-at-a-time 128 KB message cost gigabytes
+        // of memcpy; st.need is the byte count pump() last said it was
+        // waiting for.
+        st.chunks.push(data);
+        st.pendingLen += data.length;
+        if (st.acc.length + st.pendingLen < st.need) {
+            return;
+        }
+        st.acc = st.acc.length === 0 && st.chunks.length === 1
+            ? st.chunks[0]
+            : Buffer.concat([st.acc].concat(st.chunks));
+        st.chunks = [];
+        st.pendingLen = 0;
         pump(s, cfg, st);
     }
     if (flags.last && !st.killed) {
@@ -433,7 +494,15 @@ function filter(s) {
     var st = {
         mode: 'handshake',
         hs: Buffer.from(''),
+        hsReads: 0,
+        hsScanned: 0,
         acc: Buffer.from(''),
+        // Arrived-but-not-yet-materialised segments, and the byte count
+        // pump() is waiting for before it can parse further.
+        chunks: [],
+        pendingLen: 0,
+        need: 2,
+        msgReads: 0,
         pending: [],
         msgParts: [],
         msgLen: 0,

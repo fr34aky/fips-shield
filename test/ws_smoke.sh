@@ -68,5 +68,7 @@ echo "--- handshake desync (bare LF) must not bypass inspection"
 run_probe bypass_probe.py
 echo "--- prototype keys must not defeat the caps"
 run_probe proto_probe.py
+echo "--- slow-drip must not buy unbounded inspection CPU"
+run_probe drip_probe.py
 
 echo "OK"
