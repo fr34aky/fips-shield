@@ -274,6 +274,32 @@ fn set_config(pin_dir: &Path, rate: u64, burst: u64) -> Result<()> {
     Ok(())
 }
 
+/// Delete every entry whose ban has lapsed, returning how many went.
+///
+/// The BPF side only *checks* expiry, it never deletes — a lapsed entry
+/// simply stops matching. Nothing else reclaims them, and shield_bans is
+/// a fixed-size HASH rather than an LRU, so without this the map fills
+/// with corpses until `bpf_map_update_elem` starts returning E2BIG and
+/// no new node can be banned at all, host-wide, while `stats` still
+/// reports drops and everything looks healthy. A mesh identity is a
+/// keypair, so accumulating enough of them is cheap for an attacker.
+fn prune_expired(bans: &mut BpfHashMap<MapData, Addr6, BanVal>) -> Result<usize> {
+    let now = now_mono_ns();
+    let mut expired: Vec<Addr6> = Vec::new();
+    for entry in bans.iter() {
+        let (key, val) = entry?;
+        // 0 is permanent and never lapses.
+        if val.expires_mono_ns != 0 && val.expires_mono_ns <= now {
+            expired.push(key);
+        }
+    }
+    let n = expired.len();
+    for key in expired {
+        let _ = bans.remove(&key);
+    }
+    Ok(n)
+}
+
 fn cmd_ban(pin_dir: &Path, ip: &str, seconds: i64) -> Result<()> {
     let Some(addr) = parse_v6(ip)? else {
         eprintln!("note: {ip} is IPv4; the mesh is IPv6-only, nothing to do");
@@ -296,8 +322,25 @@ fn cmd_ban(pin_dir: &Path, ip: &str, seconds: i64) -> Result<()> {
             expires_epoch_s: now_epoch_s().saturating_add(secs),
         }
     };
-    bans.insert(Addr6 { b: addr.octets() }, val, 0)
-        .context("cannot insert ban")?;
+    let key = Addr6 { b: addr.octets() };
+    // A full map is the one failure that must not be terminal: fail2ban
+    // logs the error and does not retry, so a single E2BIG would end
+    // banning entirely until someone noticed. Reclaim the lapsed
+    // entries nothing else reclaims, then try once more. Retrying on
+    // any error rather than matching an errno keeps this robust to how
+    // the failure is reported.
+    if let Err(first) = bans.insert(key, val, 0) {
+        let reclaimed = prune_expired(&mut bans)
+            .context("ban failed and the expired-entry sweep also failed")?;
+        bans.insert(key, val, 0).with_context(|| {
+            format!(
+                "cannot insert ban (first attempt: {first}); swept {reclaimed} \
+                 expired entries and still could not insert — the ban map may \
+                 be full of active bans"
+            )
+        })?;
+        eprintln!("note: ban map was full; swept {reclaimed} expired entries");
+    }
     println!("banned {ip} until {}", val.expires_epoch_s);
     Ok(())
 }
@@ -342,20 +385,15 @@ fn cmd_check(pin_dir: &Path, ip: &str) -> Result<bool> {
 
 fn cmd_list(pin_dir: &Path) -> Result<()> {
     let mut bans = bans_map(pin_dir)?;
+    prune_expired(&mut bans)?;
     let now = now_mono_ns();
-    let mut expired: Vec<Addr6> = Vec::new();
     let mut active: Vec<(Ipv6Addr, u64)> = Vec::new();
 
     for entry in bans.iter() {
         let (key, val) = entry?;
         if val.expires_mono_ns == 0 || val.expires_mono_ns > now {
             active.push((Ipv6Addr::from(key.b), val.expires_epoch_s));
-        } else {
-            expired.push(key);
         }
-    }
-    for key in expired {
-        let _ = bans.remove(&key);
     }
     for (ip, until) in active {
         // Permanent bans print 0, matching "no expiry".
@@ -384,8 +422,23 @@ fn cmd_stats(pin_dir: &Path) -> Result<()> {
     } else {
         println!("throttle           disabled");
     }
-    let bans = bans_map(pin_dir)?;
-    println!("bans               {}", bans.iter().count());
+    // Occupancy, not just a count: shield_bans is a fixed-size HASH, so
+    // a map filling up is the difference between "banning works" and
+    // "no new node can be banned at all", and it was previously
+    // invisible until the first failure.
+    // Capacity comes from the map itself rather than a constant
+    // duplicated from shield_guard.bpf.c, which would silently drift.
+    let md = open_map(pin_dir, "shield_bans")?;
+    let capacity = md.info().map(|i| i.max_entries()).unwrap_or(0);
+    let mut bans: BpfHashMap<MapData, Addr6, BanVal> = BpfHashMap::try_from(Map::HashMap(md))?;
+    let total = bans.iter().count();
+    let stale = prune_expired(&mut bans)?;
+    println!(
+        "bans               {}/{} active ({} expired reclaimed)",
+        total.saturating_sub(stale),
+        capacity,
+        stale
+    );
     Ok(())
 }
 
