@@ -122,6 +122,13 @@ fips-guard list                        # "<ip> <until-epoch-seconds>"
 
 fips-guard stats                       # counters + current config
 fips-guard unload --iface fips0        # detach and unpin
+
+# is the classifier still attached? (exit 1 if not)
+fips-guard status --iface fips0
+# verify, re-attach if missing, refresh the heartbeat — the timer's job
+fips-guard watchdog --iface fips0
+# is enforcement known to be running? (what fail2ban's actioncheck calls)
+fips-guard health --max-age 180
 ```
 
 `ban`/`unban` here write only the kernel maps. Once fail2ban is driving
@@ -140,6 +147,38 @@ up stale entries as they encounter them.
 Attachment uses a classic netlink tc filter rather than TCX
 deliberately: a TCX link is owned by the process that created it and
 would disappear the moment the CLI exits.
+
+### The watchdog, and why `health` is lenient about a missing heartbeat
+
+`fips-guard.service` is `Type=oneshot` with `RemainAfterExit=yes`, so
+once it has attached the filter there is no process left and its
+`Restart=on-failure` can never fire. Nothing would notice a filter that
+disappeared — and the failure is silent, because the pinned maps outlive
+it: `check` keeps answering "banned" and `list` keeps listing while no
+packet is dropped. `fips-guard-watchdog.timer` closes that gap, once a
+minute, and records the result as a heartbeat that `health` can read
+from the sidecar (which has no network namespace of its own):
+
+```sh
+sudo systemctl enable --now fips-guard-watchdog.timer
+```
+
+`health` distinguishes two states that look alike and are not:
+
+| heartbeat | meaning | exit |
+|---|---|---|
+| never written | the timer was never enabled — nothing is *known* | 0, with a note |
+| older than `--max-age` | the timer ran and stopped — enforcement is not confirmed | 1 |
+
+The lenient answer for "never written" is deliberate. fail2ban treats a
+failing `actioncheck` as a broken action, not as missing information: it
+bumps the jail's ban epoch and re-applies every live ticket, and it
+refuses to unban at all while the check fails (`Invariant check failed.
+Unban is impossible.`). Since the timer is opt-in, a strict answer would
+put every install that skipped it into a permanent re-ban loop in which
+no node can be unbanned. A stale heartbeat is different — the timer ran,
+then stopped — and stays a hard failure, because that is the case
+fail2ban's re-apply is supposed to repair.
 
 ## Wiring it to the detection engine
 

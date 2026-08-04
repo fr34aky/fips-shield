@@ -584,6 +584,39 @@ skipping the ban action (`grep "already banned" /var/log/fail2ban.log`).
 `fail2ban-client unban <addr>` clears it. See
 [managing bans by hand](#managing-bans-by-hand).
 
+**A node will not stay unbanned — it is back in the guard seconds
+later.** The mirror image of the case above, and it is fail2ban putting
+it back, not the guard failing to remove it. fail2ban does not read a
+failing `actioncheck` as information; it reads it as a *broken action*.
+It then increments the jail's ban epoch and re-applies every live
+ticket, which re-runs `actionban` for each one. While the check is
+failing it will not unban at all — it logs `Invariant check failed.
+Unban is impossible.` and abandons the request. That is why unbanning
+appears to do nothing through both `fail2ban-client unban` and
+`fips-guard unban`: the first is refused, the second succeeds and is
+then undone.
+
+Confirm it in one line, and look for the message:
+
+```sh
+shield-ban health; echo "exit=$?"          # 0 = healthy
+grep -E "Invariant check failed|Ban .* already banned" /var/log/fail2ban.log | tail
+```
+
+On the eBPF backend, `health` reports the watchdog heartbeat, so the
+usual cause is `fips-guard-watchdog.timer` not running:
+
+```sh
+systemctl enable --now fips-guard-watchdog.timer
+```
+
+A heartbeat that has *never* been written is reported healthy on
+purpose — a backend that cannot prove it is healthy must not claim it
+is broken, since the cost of that claim is this re-ban loop. A heartbeat
+that exists and has gone **stale** is a real failure and is reported as
+one: it means the watchdog stopped, so nothing is left to notice a
+detached classifier.
+
 **nginx will not start after a config change.**
 Run `sudo nginx -t` — it names the file and line. In host mode, a
 missing `stream {}` block or the njs module not being loaded are the

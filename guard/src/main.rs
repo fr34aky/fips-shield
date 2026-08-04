@@ -272,11 +272,32 @@ fn cmd_watchdog(pin_dir: &Path, iface: &str) -> Result<()> {
 /// network namespace, no capabilities beyond map access. That is what
 /// makes it callable from the detection sidecar, which has neither a
 /// network nor a view of the mesh interface.
+///
+/// "Never ran" and "ran, then stopped" are deliberately not the same
+/// answer. Only the second is evidence that enforcement has stopped;
+/// the first is the default state of every install, because the
+/// watchdog timer is opt-in (`make install-guard` prints the enable
+/// line, it does not run it).
+///
+/// Reporting "never ran" as unhealthy is far worse than the missing
+/// signal, because fail2ban does not treat a failing actioncheck as
+/// information — it treats it as a broken action. It increments the
+/// jail's ban epoch (`Action.invalidateBanEpoch`) and re-applies every
+/// live ticket, so any unban is undone within seconds no matter which
+/// CLI performed it. It also refuses to unban at all while the check is
+/// failing: `_processCmd` runs `_beforeRepair`, which returns False for
+/// `<actionunban>` and logs "Invariant check failed. Unban is
+/// impossible." A backend that cannot prove it is healthy must not
+/// claim it is broken.
 fn cmd_health(pin_dir: &Path, max_age: u64) -> Result<bool> {
     let last = health_map(pin_dir)?.get(&0, 0).unwrap_or(0);
     if last == 0 {
-        println!("unknown: no heartbeat yet (is fips-guard-watchdog.timer running?)");
-        return Ok(false);
+        eprintln!(
+            "note: no watchdog heartbeat yet, so a detached classifier would go \
+             unnoticed. Enable it with: systemctl enable --now fips-guard-watchdog.timer"
+        );
+        println!("unknown: no heartbeat yet (watchdog not running) — reporting healthy");
+        return Ok(true);
     }
     let age = now_epoch_s().saturating_sub(last);
     if age > max_age {
@@ -480,9 +501,34 @@ fn cmd_unban(pin_dir: &Path, ip: &str) -> Result<()> {
         return Ok(());
     };
     let mut bans = bans_map(pin_dir)?;
-    // Unbanning something that is not banned is not an error.
-    let _ = bans.remove(&Addr6 { b: addr.octets() });
+    let key = Addr6 { b: addr.octets() };
+    let was_banned = bans.get(&key, 0).is_ok();
+    // Unbanning something that is not banned is not an error (the CLI
+    // contract is idempotent), but a delete that *fails* must not be
+    // reported as success. It used to be: the result was discarded, so
+    // an unban that changed nothing still printed "unbanned <ip>" and
+    // exited 0. fail2ban believes that exit code and drops its ticket,
+    // leaving the node banned in the kernel with nothing left tracking
+    // it — and the operator is told the unban worked.
+    if let Err(e) = bans.remove(&key) {
+        if was_banned {
+            return Err(e).with_context(|| format!("cannot remove the ban on {ip}"));
+        }
+    }
+    // Read back rather than trusting the delete. This is the assertion
+    // the whole command exists to make, and it costs one map lookup on
+    // a path that runs once per unban.
+    if bans.get(&key, 0).is_ok() {
+        bail!(
+            "unban of {ip} did not take: the entry is still in shield_bans. \
+             If fail2ban is running, it re-bans every live ticket whenever \
+             `actioncheck` fails — check `fips-guard health`."
+        );
+    }
     println!("unbanned {ip}");
+    if !was_banned {
+        eprintln!("note: {ip} was not banned in the guard; nothing to remove");
+    }
     Ok(())
 }
 

@@ -36,6 +36,21 @@ if ! ping6 fd97:e2e::1; then
 fi
 echo "PASS baseline ping succeeds through the guard"
 
+# A freshly loaded guard has never run the watchdog, so the heartbeat is
+# zero. That is the default state of every install (the timer is opt-in;
+# `make install-guard` prints the enable line, it does not run it), and
+# it must NOT be reported as unhealthy. fail2ban does not read a failing
+# actioncheck as information — it reads it as a broken action, bumps the
+# jail's ban epoch and re-applies every live ticket, so every unban is
+# undone within seconds; while the check fails it also refuses to unban
+# at all ("Invariant check failed. Unban is impossible."). Checked here,
+# before anything has written a heartbeat.
+if ! fips-guard health --max-age 180 >/dev/null 2>&1; then
+    echo "FAIL a never-run watchdog must not be reported as unhealthy" >&2
+    exit 1
+fi
+echo "PASS health tolerates a watchdog that has never run"
+
 fips-guard ban fd97:e2e::2 60 >/dev/null
 if ping6 fd97:e2e::1; then
     echo "FAIL banned peer should not reach the host" >&2
@@ -61,6 +76,25 @@ if ! ping6 fd97:e2e::1; then
     exit 1
 fi
 echo "PASS unban restores reachability"
+
+# unban must not report success unless the entry is really gone. The
+# result of the delete used to be discarded, so an unban that changed
+# nothing still printed "unbanned <ip>" and exited 0 — and fail2ban
+# believes that exit code, drops its ticket, and leaves the node banned
+# in the kernel with nothing tracking it.
+if fips-guard check fd97:e2e::2 >/dev/null; then
+    echo "FAIL the entry survived an unban that reported success" >&2
+    exit 1
+fi
+echo "PASS unban actually removes the map entry"
+
+# Idempotent per the CLI contract: unbanning an unbanned address still
+# succeeds, so fail2ban's actionunban cannot fail on a double unban.
+if ! fips-guard unban fd97:e2e::2 >/dev/null 2>&1; then
+    echo "FAIL unbanning an unbanned address should succeed" >&2
+    exit 1
+fi
+echo "PASS unban is idempotent"
 
 # Bans must survive a reload of the program (pinned maps are reused).
 fips-guard ban fd97:e2e::2 60 >/dev/null
@@ -159,7 +193,14 @@ fi
 echo "PASS unload leaves the interface unfiltered"
 
 # health must fail closed once the heartbeat goes stale, since that is
-# what tells fail2ban to re-apply its tickets.
+# what tells fail2ban to re-apply its tickets. A heartbeat that exists
+# and has gone stale is real evidence enforcement stopped — unlike one
+# that was never written at all, checked above.
+#
+# The sleep is load-bearing: the staleness test is `age > max_age`, so
+# with --max-age 0 an age of 0 reads as fresh. Without it this assertion
+# only passes when the preceding commands happen to span a second.
+sleep 1
 if fips-guard health --max-age 0 >/dev/null; then
     echo "FAIL health should report a stale heartbeat as unhealthy" >&2
     exit 1
