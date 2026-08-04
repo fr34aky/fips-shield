@@ -22,13 +22,15 @@ make test-http           # generic HTTP profile
 make test-guard          # eBPF guard (privileged, Linux)
 make test-guard-sidecar  # containerized fail2ban banning via guard maps
 make lint                # shellcheck + rustfmt + clippy (clippy runs with -D warnings)
-make guard               # build the eBPF guard (needs clang; build.rs compiles + embeds the BPF object)
+make guard               # build the eBPF guard, static (needs clang + the musl target)
+make guard-native        # glibc build; host-only, will NOT exec in the fail2ban sidecar
 ```
 
 Each `test-*` target is one script in `test/` — run the script directly to run a single test. The smoke tests build and run Docker containers; there is no unit-test framework. CI (`.github/workflows/ci.yml`) runs lint + validate + all smoke tests on every push.
 
 - shellcheck runs with `--exclude=SC2016` deliberately: the literal `${VAR}` lists handed to envsubst must not expand. Keep that exclusion.
 - Build the guard as your normal user, install as root (`make guard`, then `sudo make install-guard`) — rustup lives outside sudo's secure_path; the Makefile enforces this split on purpose.
+- The guard is built static (`rustup target add "$(uname -m)"-unknown-linux-musl`) because the same binary is bind-mounted into the debian:12 fail2ban sidecar. glibc is backward compatible but never forward, so a glibc build made on a newer host cannot exec there at all. Keep it static.
 
 ## Architecture
 

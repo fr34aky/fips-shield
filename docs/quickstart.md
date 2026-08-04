@@ -186,10 +186,12 @@ On Debian:
 ```sh
 sudo apt install clang linux-libc-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add "$(uname -m)"-unknown-linux-musl
 make guard                    # as your normal user
 sudo make install-guard
 mountpoint -q /sys/fs/bpf || sudo mount -t bpf bpf /sys/fs/bpf
 sudo systemctl daemon-reload && sudo systemctl enable --now fips-guard
+sudo systemctl enable --now fips-guard-watchdog.timer
 fips-guard stats              # counters + "bans 0/65536 active"
 ```
 
@@ -197,6 +199,17 @@ Use rustup rather than `apt install cargo`: Debian's packaged rustc is
 generally too old for the aya version used here. Build as your normal
 user and install as root — the Makefile enforces that split on purpose,
 because a rustup toolchain lives outside sudo's `secure_path`.
+
+The musl target is what makes the build static, and that matters in
+container mode: the sidecar bind-mounts this exact binary, and a glibc
+build would carry *your build host's* glibc version into an older image
+and fail to exec there. `file /usr/local/bin/fips-guard` should say
+`static-pie linked`.
+
+Enable the watchdog timer as well as the guard itself. `fips-guard` is
+`Type=oneshot`, so nothing notices if its tc filter later disappears —
+the pinned maps outlive it and every CLI keeps reporting bans that are
+no longer enforced. The timer re-attaches it once a minute.
 
 In container mode, add the overlay so the sidecar bans in the kernel:
 

@@ -32,17 +32,42 @@ Linux only. Kernel 5.4+ (developed against 6.8), `CAP_BPF` +
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
 ```
 
-Build needs a Rust toolchain and `clang` (compiles the BPF object;
-`build.rs` embeds it in the binary).
+Build needs a Rust toolchain, `clang` (compiles the BPF object;
+`build.rs` embeds it in the binary), and the musl target:
 
 ```sh
-cargo build --release          # -> target/release/fips-guard
-# or, from the repository root:
-make guard
+rustup target add x86_64-unknown-linux-musl    # once
+make guard                                     # from the repository root
+# -> guard/target/x86_64-unknown-linux-musl/release/fips-guard
 ```
 
 On Debian/Ubuntu/Mint the two packages are `clang` and `linux-libc-dev`
 (the latter provides `asm/types.h`, which `linux/bpf.h` includes).
+
+### Why the build is static
+
+The same binary file runs in two places: on the host under systemd, and
+inside the detection sidecar, which bind-mounts it rather than baking it
+into the image (so the writer and the classifier reading its maps can
+never be different versions).
+
+A dynamically linked build ties that file to the **build** host's glibc.
+glibc is backward compatible but never forward, so a guard built on a
+current distro needs at least that glibc version everywhere it runs —
+and the debian:12-based sidecar is older. The binary then fails to exec
+entirely, the sidecar refuses to start, and the deployment has detection
+with no enforcement. Building static removes the coupling: the binary
+depends on no libc but its own.
+
+`make guard-native` still produces a glibc build if you want one. It is
+fine for a host-only deployment and will not run in the sidecar;
+`make install-guard` warns when it installs one.
+
+Check what you have:
+
+```sh
+file /usr/local/bin/fips-guard     # want "static-pie linked"
+```
 
 The LLVM apt repository installs versioned binaries (`clang-19`,
 `clang-18`, …) with no unversioned `clang` symlink unless the `clang`
@@ -185,7 +210,8 @@ fail2ban's re-apply is supposed to repair.
 Install the wrapper as the backend fail2ban invokes:
 
 ```sh
-install -m 755 target/release/fips-guard /usr/local/bin/fips-guard
+install -m 755 target/"$(uname -m)"-unknown-linux-musl/release/fips-guard \
+    /usr/local/bin/fips-guard
 install -m 755 shield-ban /usr/local/bin/shield-ban
 ```
 

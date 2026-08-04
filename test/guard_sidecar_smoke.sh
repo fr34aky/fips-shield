@@ -18,7 +18,8 @@ GUARD_IMAGE="fips-shield-guard:test"
 F2B_IMAGE="fips-shield-f2b:test"
 PIN_NAME="fips-shield-sidecar-test"
 HOST_PIN="/sys/fs/bpf/$PIN_NAME"
-BIN="$REPO_ROOT/guard/target/release/fips-guard"
+# Resolved after the build below, which picks static when it can.
+BIN=""
 WRAPPER="$REPO_ROOT/guard/shield-ban"
 
 if [ "$(uname -s)" != "Linux" ]; then
@@ -34,7 +35,22 @@ if ! mountpoint -q /sys/fs/bpf; then
     }
 fi
 
-cargo build --release --manifest-path "$REPO_ROOT/guard/Cargo.toml"
+# This test is the one that would have caught the glibc trap: it runs the
+# host-built binary inside the real debian-based sidecar image. Build it
+# the way `make guard` does — static — so what is tested is what ships.
+GUARD_TARGET="$(uname -m)-unknown-linux-musl"
+if rustup target list --installed 2>/dev/null | grep -qx "$GUARD_TARGET"; then
+    cargo build --release --target "$GUARD_TARGET" \
+        --manifest-path "$REPO_ROOT/guard/Cargo.toml"
+    BIN="$REPO_ROOT/guard/target/$GUARD_TARGET/release/fips-guard"
+else
+    cargo build --release --manifest-path "$REPO_ROOT/guard/Cargo.toml"
+    BIN="$REPO_ROOT/guard/target/release/fips-guard"
+    echo "NOTE: $GUARD_TARGET is not installed, testing a glibc build." >&2
+    echo "  It can only exec in the sidecar when the build host's glibc is" >&2
+    echo "  no newer than the image's. Install the target for a real check:" >&2
+    echo "      rustup target add $GUARD_TARGET" >&2
+fi
 
 docker build -q -f "$REPO_ROOT"/test/guard/Dockerfile.test -t "$GUARD_IMAGE" \
     "$REPO_ROOT"/test/guard >/dev/null
@@ -90,7 +106,13 @@ docker run --rm --privileged --network none \
     "
 echo "PASS host loaded the guard"
 
-echo "=== the image can execute the host's binary (glibc, not musl) ==="
+# The trap this guards: the host binary is bind-mounted, not built in
+# the image, so it carries the BUILD host's libc requirements. glibc is
+# backward compatible but never forward, so a binary built on a distro
+# newer than this image needs a GLIBC_x.yz the image does not have and
+# will not exec at all. `make guard` builds static to make the two
+# independent; this asserts the result really does run here.
+echo "=== the image can execute the host's binary ==="
 sidecar fips-guard --version >/dev/null 2>&1 ||
     sidecar fips-guard --help >/dev/null ||
     fail "the sidecar image cannot exec the host-built fips-guard"
