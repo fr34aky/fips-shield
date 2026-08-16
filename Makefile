@@ -31,21 +31,47 @@ help:
 images: ## build the shield and fail2ban container images
 	docker build -f deploy/container/Dockerfile -t fips-shield .
 	docker build -f deploy/container/Dockerfile.fail2ban -t fips-shield-f2b .
+# Both Rust binaries ship static, so both need the musl target, and both
+# used to fail the same unhelpful way: `rustup target list` was piped
+# through grep with stderr discarded, so a host with NO rustup produced
+# the identical "install it with rustup target add" message — advice
+# that cannot be followed, since the command does not exist. Debian and
+# Ubuntu package cargo without rustup, so that is a real configuration,
+# not a corner case.
+#
+# Three states, three messages. $(1) is the target-specific fallback.
+define require-musl-target
+	@if ! command -v rustup >/dev/null 2>&1; then \
+	    echo "rustup is not installed, so the musl target cannot be added."; \
+	    echo; \
+	    echo "  'rustup target add' needs rustup. Debian and Ubuntu package"; \
+	    echo "  rustc and cargo WITHOUT it, and their rustc is usually too old"; \
+	    echo "  for the aya version used here, so installing the toolchain"; \
+	    echo "  properly is the fix rather than a workaround:"; \
+	    echo; \
+	    echo "      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"; \
+	    echo "      rustup target add $(GUARD_TARGET)"; \
+	    echo; \
+	    echo "  Run both as your normal user, never under sudo — a rustup"; \
+	    echo "  toolchain lives in ~/.cargo, outside sudo's secure_path."; \
+	    echo; \
+	    echo "  $(1)"; \
+	    exit 1; \
+	elif ! rustup target list --installed 2>/dev/null | grep -qx '$(GUARD_TARGET)'; then \
+	    echo "Rust target $(GUARD_TARGET) is not installed."; \
+	    echo; \
+	    echo "  rustup is present, so this is one command:"; \
+	    echo "      rustup target add $(GUARD_TARGET)"; \
+	    echo; \
+	    echo "  $(1)"; \
+	    exit 1; \
+	fi
+endef
+
 
 .PHONY: guard
 guard: ## build the eBPF guard binary, static (Linux, needs clang)
-	@rustup target list --installed 2>/dev/null | grep -qx '$(GUARD_TARGET)' || { \
-	    echo "Rust target $(GUARD_TARGET) is not installed."; \
-	    echo; \
-	    echo "The guard is built static so ONE binary runs both on the host"; \
-	    echo "and inside the detection sidecar, whose glibc is older than"; \
-	    echo "most build hosts'. Install the target with:"; \
-	    echo "    rustup target add $(GUARD_TARGET)"; \
-	    echo; \
-	    echo "If this host never runs the container-mode sidecar, a"; \
-	    echo "host-only build works too: make guard-native"; \
-	    exit 1; \
-	}
+	$(call require-musl-target,The guard is static so ONE binary runs on the host and in the detection sidecar, whose glibc is older. If this host never runs that sidecar: make guard-native)
 	cargo build --release --target $(GUARD_TARGET) --manifest-path guard/Cargo.toml
 	@echo "built $(GUARD_BIN)"
 
@@ -88,15 +114,17 @@ test-multiprofile: ## behavioral: per-profile limits stay isolated from each oth
 test-ui: ## behavioral: read-only dashboard serves and refuses what it should
 	test/ui_smoke.sh
 
-.PHONY: ui install-ui
+.PHONY: ui ui-native install-ui
 ui: ## build the read-only status dashboard (static, same musl target as the guard)
-	@rustup target list --installed 2>/dev/null | grep -qx '$(GUARD_TARGET)' || { \
-	    echo "missing target $(GUARD_TARGET). Install it with:"; \
-	    echo "    rustup target add $(GUARD_TARGET)"; \
-	    exit 1; \
-	}
+	$(call require-musl-target,Host-only build: make ui-native. In container mode you need none of this — the image builds it: docker compose -f compose.yaml -f compose.ui.yaml up -d --build)
 	cargo build --release --target $(GUARD_TARGET) --manifest-path ui/Cargo.toml
 	@echo "built $(UI_BIN)"
+
+ui-native: ## build the dashboard against the host libc (host-only; see `ui`)
+	cargo build --release --manifest-path ui/Cargo.toml
+	@echo "built $(UI_BIN_NATIVE)"
+	@echo "note: not static. Fine for host mode; the container overlay"
+	@echo "      builds its own binary and does not use this.
 
 install-ui: ## install the dashboard and its systemd unit (needs root)
 	@bin="$(UI_BIN)"; \
