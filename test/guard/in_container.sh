@@ -207,8 +207,15 @@ if fips-guard health --max-age 0 >/dev/null; then
 fi
 echo "PASS health reports a stale heartbeat as unhealthy"
 
-ip netns del client
-ip link del veth-host
+# Deleting the netns destroys veth-peer, and destroying either end of a
+# veth pair destroys both — so veth-host usually disappears on its own,
+# asynchronously, a few milliseconds later. Racing it with `ip link del`
+# under `set -e` failed the whole run *after every assertion had passed*
+# (measured: present at +10ms, gone at +20ms). Local runs won the race,
+# CI lost it. Best-effort teardown, since the container exits next
+# anyway.
+ip netns del client || true
+ip link del veth-host 2>/dev/null || true
 
 echo
 echo "=== TUN injection (L3 device — the fips0 shape) ==="
