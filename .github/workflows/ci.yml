@@ -18,10 +18,14 @@ jobs:
           shellcheck --exclude=SC2016 $(git ls-files '*.sh') \
             core/actions/shield-ban guard/shield-ban bin/shield-config
       - name: rustfmt
-        run: cargo fmt --manifest-path guard/Cargo.toml --check
+        run: |
+          cargo fmt --manifest-path guard/Cargo.toml --check
+          cargo fmt --manifest-path ui/Cargo.toml --check
       - name: clippy
         run: |
           cargo clippy --manifest-path guard/Cargo.toml \
+            --all-targets -- -D warnings
+          cargo clippy --manifest-path ui/Cargo.toml \
             --all-targets -- -D warnings
 
   static:
@@ -52,6 +56,13 @@ jobs:
       # one configuration in which shared limit state cannot be seen.
       - name: per-profile limits stay isolated
         run: test/multiprofile_smoke.sh
+      # The dashboard reads the shield's own view (banned identities,
+      # log contents), so this asserts the refusals as much as the
+      # reporting: no traversal, no write verbs, no routable bind.
+      - name: read-only dashboard
+        run: |
+          cargo test --manifest-path ui/Cargo.toml
+          test/ui_smoke.sh
 
   guard:
     # Needs a privileged container and a kernel with BPF + BTF; the

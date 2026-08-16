@@ -68,10 +68,20 @@ for level in $LEVELS; do
         fail2ban-client -t >/dev/null
 done
 
-# Every key a preset defines must be one the templates or jails actually
-# use — a stale preset key is a value the operator sets that does nothing.
-KNOWN=$(grep -rhoE '\$\{SHIELD_[A-Z0-9_]+\}' \
-            "$REPO_ROOT"/core "$REPO_ROOT"/profiles | tr -d '${}' | sort -u)
+# Every key a preset defines must actually be consumed somewhere — a
+# stale preset key is a value the operator sets that does nothing.
+#
+# Two consumers, not one: a ${SHIELD_*} placeholder in a template, or a
+# key shield-config hands to the enforcement backend (SHIELD_BAN_FILE,
+# SHIELD_BAN_ALSO_FILE, SHIELD_GUARD_PIN_DIR go through `action-env`
+# rather than through envsubst, precisely because that list has to be
+# conditional).
+KNOWN=$(
+    grep -rhoE '\$\{SHIELD_[A-Z0-9_]+\}' \
+        "$REPO_ROOT"/core "$REPO_ROOT"/profiles | tr -d '${}'
+    grep -hoE 'SHIELD_[A-Z0-9_]+' "$REPO_ROOT"/bin/shield-config
+)
+KNOWN=$(printf '%s\n' "$KNOWN" | sort -u)
 for f in "$REPO_ROOT"/presets/*/*.env; do
     while IFS= read -r key; do
         case "
@@ -116,6 +126,36 @@ for level in $LEVELS; do
     done
 done
 echo "--- resolver keeps empty values empty and emits each key once"
+
+# The banaction must carry SHIELD_GUARD_PIN_DIR when it is set, and must
+# omit it entirely when it is not. Both halves matter: without the first
+# a custom pin directory made every ban target maps that do not exist
+# (fail2ban logged success, the kernel enforced nothing); with an empty
+# `SHIELD_GUARD_PIN_DIR=` instead of an omission, clap would take the
+# empty string as the value and break the default case too.
+ACT="$REPO_ROOT/core/fail2ban/action.d/fips-shield.conf.template"
+
+cp "$WORK_DIR/shield.env" "$WORK_DIR/env.pin"
+echo "SHIELD_GUARD_PIN_DIR=/sys/fs/bpf/custom-test" >> "$WORK_DIR/env.pin"
+rendered=$(SHIELD_ACTION_ENV="$("$REPO_ROOT"/bin/shield-config action-env -f "$WORK_DIR/env.pin")"     envsubst '${SHIELD_ACTION_ENV}' < "$ACT")
+for verb in actioncheck actionban actionunban; do
+    echo "$rendered" | grep -q "^$verb = .*SHIELD_GUARD_PIN_DIR='/sys/fs/bpf/custom-test'" || {
+        echo "error: $verb does not carry a custom SHIELD_GUARD_PIN_DIR" >&2
+        echo "$rendered" >&2
+        exit 1
+    }
+done
+
+rendered=$(SHIELD_ACTION_ENV="$("$REPO_ROOT"/bin/shield-config action-env -f "$WORK_DIR/shield.env")"     envsubst '${SHIELD_ACTION_ENV}' < "$ACT")
+# Only the action lines — the template's own comments name the
+# variable, and matching those would fail for the wrong reason.
+if echo "$rendered" | grep -E '^action(check|ban|unban) = ' |
+        grep -q 'SHIELD_GUARD_PIN_DIR'; then
+    echo "error: SHIELD_GUARD_PIN_DIR is unset but still reached the action" >&2
+    echo "$rendered" >&2
+    exit 1
+fi
+echo "--- banaction carries a custom guard pin dir, and omits an unset one"
 
 # Detection sidecar: render the jails and let fail2ban verify the full
 # configuration (filters, action, jail wiring).

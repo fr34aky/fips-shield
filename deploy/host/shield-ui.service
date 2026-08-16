@@ -1,0 +1,84 @@
+# fips-shield read-only status dashboard.
+#
+#   make ui && sudo make install-ui
+#   sudo systemctl enable --now shield-ui
+#   ssh -N -L 8088:127.0.0.1:8088 <node>     # then open localhost:8088
+#
+# Binds loopback. The binary refuses a routable address unless
+# --insecure-bind is passed, because this page has no authentication and
+# serves the shield's own view: which nodes are banned, and the contents
+# of the access logs. Tunnel to it rather than exposing it.
+#
+# Override the bind or the paths in /etc/default/shield-ui:
+#   SHIELD_UI_BIND=127.0.0.1:9000
+#   SHIELD_UI_ENV_FILE=/etc/fips-shield/shield.env
+
+[Unit]
+Description=fips-shield read-only status dashboard
+Documentation=https://github.com/fr34aky/fips-shield
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/shield-ui
+ExecStart=/usr/local/bin/shield-ui
+Restart=on-failure
+RestartSec=5s
+
+# It shells out to shield-config, shield-ban and fips-guard, all of
+# which only read here, and it opens log files for reading. It needs no
+# write access anywhere, so it gets none.
+#
+# DynamicUser is deliberately NOT used: reading /var/log/nginx and the
+# guard's pinned maps needs a stable identity, and a dynamic one would
+# make those permissions unreproducible across restarts.
+User=root
+ProtectSystem=strict
+# read-only rather than yes: shield.env very often lives in a checkout
+# under a home directory, and ProtectHome=yes makes it unreadable — the
+# dashboard then starts fine and reports "no shield.env was found" for
+# every panel. Writes are still blocked. Tighten this to `yes` if you
+# keep shield.env outside /home (e.g. /etc/fips-shield/shield.env).
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+# Empty on purpose. The dashboard needs no capability to read logs or
+# run shield-config.
+#
+# The one consequence: with the eBPF backend, `shield-ban list` and
+# `fips-guard stats` open pinned BPF maps, which needs CAP_BPF — so the
+# Bans and Kernel guard panels will report a permission error. That is
+# the safe default, because CAP_BPF is HOST-WIDE: it permits opening
+# every BPF map on the machine, not just the shield's.
+#
+# To accept that trade and light up those panels:
+#   sudo systemctl edit shield-ui
+#   [Service]
+#   CapabilityBoundingSet=CAP_BPF
+#
+# On the file backend (no eBPF guard) nothing is needed — shield-ban
+# just reads the banlist.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Loopback only. If you have deliberately bound a routable address
+# behind a real authenticating proxy, widen this too.
+IPAddressAllow=localhost
+IPAddressDeny=any
+ReadOnlyPaths=/var/log/nginx /sys/fs/bpf
+
+[Install]
+WantedBy=multi-user.target

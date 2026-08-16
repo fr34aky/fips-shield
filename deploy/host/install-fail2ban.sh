@@ -47,7 +47,12 @@ else
     install -m 755 "$REPO_ROOT"/core/actions/shield-ban "$BAN_BIN"
 fi
 
-envsubst '${SHIELD_BAN_FILE} ${SHIELD_BAN_ALSO_FILE}' \
+# Conditional, so it cannot be an envsubst placeholder per key: an
+# unset SHIELD_GUARD_PIN_DIR must be omitted from the action rather than
+# rendered as an empty assignment.
+SHIELD_ACTION_ENV="$("$REPO_ROOT"/bin/shield-config action-env -f "$ENV_FILE")"
+export SHIELD_ACTION_ENV
+envsubst '${SHIELD_ACTION_ENV}' \
     < "$REPO_ROOT"/core/fail2ban/action.d/fips-shield.conf.template \
     > "$F2B_DIR/action.d/fips-shield.conf"
 

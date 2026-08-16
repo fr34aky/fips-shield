@@ -26,6 +26,8 @@ make test-guard          # eBPF guard (privileged, Linux)
 make test-guard-sidecar  # containerized fail2ban banning via guard maps
 make lint                # shellcheck + rustfmt + clippy (clippy runs with -D warnings)
 make guard               # build the eBPF guard, static (needs clang + the musl target)
+make ui                  # build the read-only status dashboard (static, same musl target)
+make test-ui             # dashboard serves what it should and refuses what it should
 make guard-native        # glibc build; host-only, will NOT exec in the fail2ban sidecar
 ```
 
@@ -71,6 +73,35 @@ A profile (`profiles/<service>/`) makes one service protected and is usually **o
 - File-name numeric prefixes set nginx include order: `00`/`05` are core, profiles start at `10`. Pick a range that won't collide with other profiles enabled simultaneously.
 - New tunables go in `shield.env.example` with a comment; profiles are enabled via `SHIELD_PROFILES` (comma-separated).
 - `test/validate.sh` auto-discovers profiles and renders each one alone *and* all together — a profile that depends on another or collides with one fails CI.
+
+### The status dashboard (`ui/`)
+
+`shield-ui` is a read-only web view: services and their effective
+limits, bans, guard counters, log tails. Strictly read-only — no ban,
+unban, config write, or reload path — because everything it does needs
+no privilege beyond reading, and adding a write verb needs an
+authenticated privileged helper instead.
+
+- It resolves config by calling `shield-config show --porcelain`, never
+  by parsing `shield.env` itself, so the dashboard and the shield cannot
+  disagree about what is in force.
+- No web framework, deliberately: GET-only, fixed route table, loopback
+  bind, ~19 crates instead of a runtime and its tree.
+- It refuses a non-loopback bind without `--insecure-bind`. The page has
+  no authentication and reveals banned identities and log contents.
+- Log lookups are whitelisted against the configured service names
+  because the name is interpolated into a filename.
+- Built static from the same musl target as the guard.
+- **Two deploy modes, and the choice is forced.** In container mode the
+  logs and banlist are docker named volumes, not `/var/log/nginx` and
+  `/var/lib/fips-shield` — so a host install against a container stack
+  resolves config correctly and then shows nothing. Container mode uses
+  `deploy/container/compose.ui.yaml` (image builds shield-ui itself, no
+  host toolchain); host mode uses `make install-ui`.
+- Host mode: the unit has an empty `CapabilityBoundingSet`, so root has
+  no `CAP_DAC_READ_SEARCH` and cannot traverse a 0750 home directory.
+  `shield.env` must live somewhere root-readable (`/etc/fips-shield/`).
+  `install-ui` checks and warns.
 
 ### Frozen contracts (the plugin seams)
 

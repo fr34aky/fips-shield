@@ -13,6 +13,8 @@ works.
 - **[Presets](../presets/README.md)** — the strict/default/loose
   enforcement levels, how `shield.env` overrides them, and
   `shield-config show` for seeing what a node actually enforces.
+- **[Status dashboard](admin-ui.md)** — the read-only web view of what
+  a node is enforcing and who is banned, and why it binds loopback.
 - **[User guide](guide.md)** — what it protects against, how to install
   and run it (containers or host), every configuration option, and how
   to operate it day to day.

@@ -3,8 +3,10 @@
 #
 #   shield-config resolve [-f FILE|--from-env]   full KEY=VALUE environment
 #   shield-config show    [SERVICE] [-f FILE]    effective values + where each came from
+#                         --porcelain            same, as SOURCE<TAB>KEY<TAB>VALUE
 #   shield-config diff    [SERVICE] [-f FILE]    only what you have overridden
 #   shield-config levels                         available presets
+#   shield-config action-env [-f FILE|--from-env] assignments the fail2ban action needs
 #
 # Two layers, and only two:
 #
@@ -61,7 +63,7 @@ LEVELS="strict default loose"
 die() { echo "shield-config: $*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -91,10 +93,20 @@ collect_from_env() {
         eval "val=\$$key"
         printf '%s\t%s\n' "$key" "$val"
     done
-    for key in SHIELD_PROFILES SHIELD_BIND_ADDR SHIELD_PRESET \
-               SHIELD_STRFRY_PRESET SHIELD_HTTP_PRESET SHIELD_TCP_PRESET; do
-        eval "isset=\${$key+yes}"
-        [ "${isset:-}" = yes ] || continue
+    # Everything else SHIELD_*-shaped that is in the environment:
+    # SHIELD_PROFILES, SHIELD_BIND_ADDR, the SHIELD_*_PRESET selectors,
+    # and the SHIELD_GUARD_* keys the eBPF backend reads. Enumerated
+    # rather than listed, so a key added later is not silently dropped
+    # here — which is how SHIELD_GUARD_PIN_DIR failed to reach the
+    # fail2ban action.
+    _seen=$(all_preset_keys)
+    awk 'BEGIN { for (k in ENVIRON) if (k ~ /^SHIELD_/) print k }' | sort |
+    while IFS= read -r key; do
+        case "
+$_seen
+" in *"
+$key
+"*) continue ;; esac
         val=""
         eval "val=\$$key"
         printf '%s\t%s\n' "$key" "$val"
@@ -205,6 +217,7 @@ SERVICE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -f|--file)  ENV_FILE=${2:?-f needs a path}; shift 2 ;;
+        --porcelain) PORCELAIN=yes; shift ;;
         --from-env) FROM_ENV=yes; shift ;;
         --shell)    SHELL_OUT=yes; shift ;;
         -h|--help)  usage 0 ;;
@@ -213,6 +226,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 SHELL_OUT=${SHELL_OUT:-no}
+PORCELAIN=${PORCELAIN:-no}
 
 CUSTOM_FILE=$(mktemp)
 trap 'rm -f "$CUSTOM_FILE"' EXIT INT TERM
@@ -267,6 +281,18 @@ resolve)
     done
     ;;
 show)
+    # Machine-readable: SOURCE<TAB>KEY<TAB>VALUE, one per line. Value is
+    # last so it may contain anything, including a tab — a consumer
+    # splits on the first two separators only. Used by the read-only UI
+    # so it never has to reimplement preset resolution.
+    if [ "$PORCELAIN" = yes ]; then
+        resolve_all | filter_service | while IFS= read -r _line; do
+            k=${_line%%"$TAB"*}; _rest=${_line#*"$TAB"}
+            v=${_rest%"$TAB"*}; src=${_rest##*"$TAB"}
+            printf '%s\t%s\t%s\n' "$src" "$k" "$v"
+        done
+        exit 0
+    fi
     if [ -n "$SERVICE" ]; then
         printf 'service %s   preset %s\n\n' "$SERVICE" "$(level_for "$SERVICE")"
     else
@@ -294,7 +320,36 @@ diff)
         printf '  %-34s %s\n' "$k" "$v"
     done
     ;;
+action-env)
+    # fail2ban runs actions with its own environment, which in host mode
+    # contains nothing from shield.env, so the banaction has to carry
+    # what the backend reads as explicit assignments.
+    #
+    # Built here rather than substituted into the action template
+    # because the list is conditional. SHIELD_GUARD_PIN_DIR has no
+    # preset and no default in shield.env: when it is unset fips-guard
+    # supplies its own default, but an *empty* assignment is not the
+    # same thing — clap treats a set-but-empty env var as the value, so
+    # emitting `SHIELD_GUARD_PIN_DIR=` would point the guard at nothing
+    # and every ban would fail. Unset keys are therefore omitted, not
+    # emitted empty.
+    _env=""
+    _res=$(resolve_all)
+    for k in SHIELD_BAN_FILE SHIELD_BAN_ALSO_FILE SHIELD_GUARD_PIN_DIR; do
+        _v=$(printf '%s\n' "$_res" | while IFS= read -r _l; do
+                 [ "${_l%%"$TAB"*}" = "$k" ] || continue
+                 _r=${_l#*"$TAB"}
+                 printf '%s' "${_r%"$TAB"*}"
+             done)
+        [ -n "$_v" ] || continue
+        # Single-quote so a path with spaces survives the shell fail2ban
+        # runs the action through; a literal ' becomes '\''.
+        _env="$_env $k='$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")'"
+    done
+    # Leading space trimmed: this lands at the start of a command line.
+    printf '%s\n' "${_env# }"
+    ;;
 *)
-    die "unknown command '$CMD' (resolve|show|diff|levels)"
+    die "unknown command '$CMD' (resolve|show|diff|levels|action-env)"
     ;;
 esac

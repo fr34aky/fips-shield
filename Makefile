@@ -18,6 +18,8 @@ PREFIX ?= /usr/local
 # a GLIBC_x.yz loader error. Static removes the coupling entirely and works
 # on any base image, including Alpine.
 GUARD_TARGET ?= $(shell uname -m)-unknown-linux-musl
+UI_BIN := ui/target/$(GUARD_TARGET)/release/shield-ui
+UI_BIN_NATIVE := ui/target/release/shield-ui
 GUARD_BIN := guard/target/$(GUARD_TARGET)/release/fips-guard
 GUARD_BIN_NATIVE := guard/target/release/fips-guard
 
@@ -72,7 +74,7 @@ lint: ## shellcheck + rustfmt + clippy
 validate: ## static: render every profile, nginx -t, fail2ban -t
 	test/validate.sh
 
-.PHONY: test-ws test-ban test-tcp test-http test-multiprofile test-guard test-guard-sidecar test-filters
+.PHONY: test-ws test-ban test-tcp test-http test-multiprofile test-ui test-guard test-guard-sidecar test-filters
 test-ws: ## behavioral: WebSocket message policy
 	test/ws_smoke.sh
 test-ban: ## behavioral: detection -> enforcement loop
@@ -83,6 +85,72 @@ test-http: ## behavioral: generic HTTP profile
 	test/http_smoke.sh
 test-multiprofile: ## behavioral: per-profile limits stay isolated from each other
 	test/multiprofile_smoke.sh
+test-ui: ## behavioral: read-only dashboard serves and refuses what it should
+	test/ui_smoke.sh
+
+.PHONY: ui install-ui
+ui: ## build the read-only status dashboard (static, same musl target as the guard)
+	@rustup target list --installed 2>/dev/null | grep -qx '$(GUARD_TARGET)' || { \
+	    echo "missing target $(GUARD_TARGET). Install it with:"; \
+	    echo "    rustup target add $(GUARD_TARGET)"; \
+	    exit 1; \
+	}
+	cargo build --release --target $(GUARD_TARGET) --manifest-path ui/Cargo.toml
+	@echo "built $(UI_BIN)"
+
+install-ui: ## install the dashboard and its systemd unit (needs root)
+	@bin="$(UI_BIN)"; \
+	[ -x "$$bin" ] || bin="$(UI_BIN_NATIVE)"; \
+	test -x "$$bin" || { echo "no built shield-ui; run 'make ui' first"; exit 1; }; \
+	install -m 755 "$$bin" /usr/local/bin/shield-ui
+	install -m 644 deploy/host/shield-ui.service /etc/systemd/system/
+	@# shield-ui resolves config by RUNNING shield-config, so it needs it
+	@# on the host even in container mode, where everything else lives in
+	@# the images. Installing only the binary left the dashboard reporting
+	@# "could not be run" for every panel.
+	install -d /usr/local/share/fips-shield
+	cp -r presets /usr/local/share/fips-shield/
+	install -m 755 bin/shield-config /usr/local/bin/shield-config
+	@# Point the service at the env file this install used. Without it the
+	@# service starts in / and shield-config finds no shield.env.
+	@env_abs="$$(cd "$$(dirname '$(ENV)')" 2>/dev/null && pwd)/$$(basename '$(ENV)')"; \
+	if [ ! -f "$$env_abs" ]; then \
+	    echo "note: $(ENV) not found. Set SHIELD_UI_ENV_FILE in"; \
+	    echo "      /etc/default/shield-ui, or the dashboard will find no config."; \
+	elif ! timeout 5 su -s /bin/sh -c "test -r '$$env_abs'" nobody 2>/dev/null; then \
+	    echo; \
+	    echo "WARNING: $$env_abs is not readable by an unprivileged user."; \
+	    echo "  The unit runs as root with an empty CapabilityBoundingSet, so it has"; \
+	    echo "  no CAP_DAC_READ_SEARCH and cannot traverse a 0750 home directory."; \
+	    echo "  The dashboard would start cleanly and report 'no such env file'."; \
+	    echo; \
+	    echo "  Move it somewhere root-readable and point the stack at it:"; \
+	    echo "      sudo install -d /etc/fips-shield"; \
+	    echo "      sudo cp $$env_abs /etc/fips-shield/shield.env"; \
+	    echo "      sudo make install-ui ENV=/etc/fips-shield/shield.env"; \
+	    echo; \
+	    echo "  In container mode do NOT use host mode for the dashboard at all —"; \
+	    echo "  the logs and banlist are docker volumes, not host paths. Use:"; \
+	    echo "      docker compose -f compose.yaml -f compose.ui.yaml up -d --build"; \
+	    echo; \
+	    install -d /etc/default; \
+	    printf 'SHIELD_UI_ENV_FILE=%s\n' "$$env_abs" > /etc/default/shield-ui; \
+	else \
+	    install -d /etc/default; \
+	    printf 'SHIELD_UI_ENV_FILE=%s\n' "$$env_abs" > /etc/default/shield-ui; \
+	    echo "config: shield-ui will read $$env_abs"; \
+	fi
+	@# shield-ban is installed by `make install` or `make install-guard`,
+	@# not here — say so rather than let the Bans panel fail unexplained.
+	@test -x /usr/local/bin/shield-ban || { \
+	    echo "note: /usr/local/bin/shield-ban is missing, so the Bans panel"; \
+	    echo "      will report it. Install it with 'sudo make install' or"; \
+	    echo "      'sudo make install-guard'."; \
+	}
+	@echo
+	@echo "now: systemctl daemon-reload && systemctl enable --now shield-ui"
+	@echo "then, from your workstation:"
+	@echo "     ssh -N -L 8088:127.0.0.1:8088 <node>   # open localhost:8088"
 
 .PHONY: show diff levels
 show: ## effective config and where each value came from (SERVICE=http to narrow)
@@ -99,7 +167,7 @@ test-filters: ## detection: fail2ban filters match real log lines
 	test/filters_test.sh
 
 .PHONY: test
-test: validate test-filters test-ws test-ban test-tcp test-http test-multiprofile test-guard test-guard-sidecar ## run the full suite
+test: validate test-filters test-ws test-ban test-tcp test-http test-multiprofile test-ui test-guard test-guard-sidecar ## run the full suite
 
 .PHONY: install
 install: ## host mode: render configs, install detection + guard (needs root)

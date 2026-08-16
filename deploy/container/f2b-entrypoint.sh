@@ -10,7 +10,9 @@ set -eu
 # fail2ban silently replaces with its own default.
 eval "$(/usr/local/bin/shield-config resolve --from-env --shell)"
 
-envsubst '${SHIELD_BAN_FILE} ${SHIELD_BAN_ALSO_FILE}' \
+SHIELD_ACTION_ENV="$(/usr/local/bin/shield-config action-env --from-env)"
+export SHIELD_ACTION_ENV
+envsubst '${SHIELD_ACTION_ENV}' \
     < /etc/fail2ban/fips-shield-action.conf.template \
     > /etc/fail2ban/action.d/fips-shield.conf
 
