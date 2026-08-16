@@ -2,3 +2,4 @@ shield.env
 deploy/container/shield.env
 guard/target/
 __pycache__/
+ui/target/

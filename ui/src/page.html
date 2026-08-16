@@ -1,0 +1,274 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fips-shield</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #16181d; --muted: #5d6470; --line: #e2e5ea;
+    --panel: #f7f8fa; --accent: #1f6feb; --warn: #b45309; --bad: #b42318;
+    --ok: #067647; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e6e8ec; --muted: #9099a8; --line: #262b33;
+      --panel: #161a20; --accent: #6ea8fe; --warn: #f0b429; --bad: #f97066;
+      --ok: #4ade80; --chip: #1d222a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 1.1rem; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
+       color: var(--muted); margin: 1.75rem 0 .6rem; font-weight: 600; }
+  header { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
+           border-bottom: 1px solid var(--line); padding-bottom: .9rem; }
+  .sub { color: var(--muted); font-size: .82rem; }
+  .grid { display: grid; gap: .75rem;
+          grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 9px; padding: .85rem .95rem; }
+  .card h3 { margin: 0 0 .1rem; font-size: .95rem; display: flex;
+             align-items: center; gap: .5rem; }
+  .chip { font-size: .68rem; text-transform: uppercase; letter-spacing: .05em;
+          background: var(--chip); color: var(--muted); border-radius: 999px;
+          padding: .12rem .5rem; font-weight: 600; }
+  .chip.strict { color: var(--bad); } .chip.loose { color: var(--warn); }
+  .chip.custom { color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; font-size: .82rem; }
+  td, th { text-align: left; padding: .22rem .5rem .22rem 0;
+           border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: .8rem; }
+  .src { color: var(--muted); font-size: .72rem; }
+  .src.custom { color: var(--accent); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  pre { background: var(--panel); border: 1px solid var(--line);
+        border-radius: 9px; padding: .7rem .8rem; overflow-x: auto;
+        font-size: .76rem; margin: 0; max-height: 22rem; overflow-y: auto; }
+  .banner { border-radius: 9px; padding: .7rem .9rem; margin: 1rem 0;
+            border: 1px solid var(--line); }
+  .banner.bad { border-color: var(--bad); color: var(--bad); }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%;
+         display: inline-block; }
+  .dot.on { background: var(--ok); } .dot.off { background: var(--muted); }
+  select, button { font: inherit; font-size: .8rem; padding: .25rem .5rem;
+                   border-radius: 6px; border: 1px solid var(--line);
+                   background: var(--bg); color: var(--fg); }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .empty { color: var(--muted); font-size: .82rem; }
+</style>
+
+<header>
+  <h1>fips-shield</h1>
+  <span class="sub" id="bindaddr"></span>
+  <span class="sub" style="margin-left:auto" id="updated"></span>
+</header>
+
+<div id="banner"></div>
+
+<h2>Services</h2>
+<div class="grid" id="services"></div>
+
+<h2>Bans</h2>
+<div id="bans"></div>
+
+<h2>Kernel guard</h2>
+<div id="guard"></div>
+
+<h2>Logs</h2>
+<div class="row" style="margin-bottom:.6rem">
+  <select id="logsvc"></select>
+  <select id="logkind">
+    <option value="stream">stream (sessions)</option>
+    <option value="access">access (requests)</option>
+  </select>
+  <button id="reload">Reload</button>
+  <span class="sub" id="logmeta"></span>
+</div>
+<pre id="logs" class="mono">…</pre>
+
+<script>
+// Read-only client. Every endpoint it calls is a GET, and the server
+// serves nothing else — there is deliberately no ban/unban control here.
+const $ = (id) => document.getElementById(id);
+const text = (s) => document.createTextNode(s == null ? "" : String(s));
+
+// Always build DOM through textContent/createTextNode, never innerHTML:
+// log lines and config values are attacker-influenced (a User-Agent
+// lands in the access log verbatim), and this page renders them.
+function el(tag, cls, content) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (content != null) e.textContent = String(content);
+  return e;
+}
+
+function fmtDuration(s) {
+  if (s <= 0) return "expired";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${s}s`;
+}
+
+function renderServices(list) {
+  const box = $("services");
+  box.replaceChildren();
+  if (!list.length) {
+    box.appendChild(el("div", "empty", "No profiles enabled."));
+    return;
+  }
+  for (const s of list) {
+    const card = el("div", "card");
+    const h = el("h3");
+    h.appendChild(text(s.name));
+    h.appendChild(el("span", "chip " + (s.preset || ""), s.preset));
+    card.appendChild(h);
+    card.appendChild(el("div", "sub",
+      `${s.profile} · port ${s.port || "?"} → ${s.upstream || "?"}`));
+
+    const wrap = el("div", "scroll");
+    const t = el("table");
+    for (const l of s.limits) {
+      const tr = el("tr");
+      tr.appendChild(el("td", "mono", l.key.replace(/^SHIELD_/, "")));
+      tr.appendChild(el("td", "mono", l.value === "" ? "—" : l.value));
+      tr.appendChild(el("td",
+        "src" + (l.source === "custom" ? " custom" : ""),
+        l.source === "custom" ? "custom" : "preset"));
+      t.appendChild(tr);
+    }
+    wrap.appendChild(t);
+    card.appendChild(wrap);
+    box.appendChild(card);
+  }
+}
+
+function renderBans(d) {
+  const box = $("bans");
+  box.replaceChildren();
+  if (!d.bans_ok) {
+    box.appendChild(el("div", "empty",
+      "shield-ban could not be run, so the ban list is unavailable."));
+    return;
+  }
+  if (!d.bans.length) {
+    box.appendChild(el("div", "empty", "Nobody is banned."));
+    return;
+  }
+  const head = el("div", "sub");
+  head.textContent = `${d.ban_count} banned` +
+    (d.ban_count > d.bans.length ? ` (showing ${d.bans.length})` : "");
+  box.appendChild(head);
+
+  const wrap = el("div", "scroll");
+  const t = el("table");
+  const hr = el("tr");
+  for (const c of ["Node", "Expires in"]) hr.appendChild(el("th", null, c));
+  t.appendChild(hr);
+  for (const b of d.bans) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", b.addr));
+    tr.appendChild(el("td", null,
+      b.permanent ? "permanent" : fmtDuration(b.remaining)));
+    t.appendChild(tr);
+  }
+  wrap.appendChild(t);
+  box.appendChild(wrap);
+}
+
+function renderGuard(d) {
+  const box = $("guard");
+  box.replaceChildren();
+  if (!d.guard_ok) {
+    box.appendChild(el("div", "empty",
+      "Not in use. Bans are enforced by the banlist file; " +
+      "the eBPF guard is optional."));
+    return;
+  }
+  const wrap = el("div", "scroll");
+  const t = el("table");
+  for (const g of d.guard) {
+    const tr = el("tr");
+    tr.appendChild(el("td", null, g.label));
+    tr.appendChild(el("td", "mono", g.value));
+    t.appendChild(tr);
+  }
+  wrap.appendChild(t);
+  box.appendChild(wrap);
+}
+
+let services = [];
+
+async function refresh() {
+  let d;
+  try {
+    const r = await fetch("/api/status");
+    if (!r.ok) throw new Error("status " + r.status);
+    d = await r.json();
+  } catch (e) {
+    $("banner").replaceChildren(
+      el("div", "banner bad", "Cannot reach shield-ui: " + e.message));
+    return;
+  }
+
+  $("banner").replaceChildren();
+  if (!d.config_ok) {
+    $("banner").replaceChildren(
+      el("div", "banner bad", d.config_error || "Configuration unreadable."));
+  }
+  $("bindaddr").textContent = d.bind_addr ? "bound " + d.bind_addr : "";
+  $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+
+  renderServices(d.services);
+  renderBans(d);
+  renderGuard(d);
+
+  const names = d.services.map((s) => s.name);
+  if (names.join() !== services.join()) {
+    services = names;
+    const sel = $("logsvc");
+    const keep = sel.value;
+    sel.replaceChildren();
+    for (const n of names) {
+      const o = el("option", null, n);
+      o.value = n;
+      sel.appendChild(o);
+    }
+    if (names.includes(keep)) sel.value = keep;
+    loadLogs();
+  }
+}
+
+async function loadLogs() {
+  const svc = $("logsvc").value, kind = $("logkind").value;
+  if (!svc) { $("logs").textContent = "No service selected."; return; }
+  try {
+    const r = await fetch(
+      `/api/logs?service=${encodeURIComponent(svc)}&kind=${kind}&n=200`);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "status " + r.status);
+    $("logs").textContent = d.lines.length
+      ? d.lines.join("\n")
+      : "Nothing logged yet.";
+    $("logmeta").textContent = `${d.lines.length} lines`;
+  } catch (e) {
+    $("logs").textContent = "Could not read the log: " + e.message;
+    $("logmeta").textContent = "";
+  }
+}
+
+$("logsvc").addEventListener("change", loadLogs);
+$("logkind").addEventListener("change", loadLogs);
+$("reload").addEventListener("click", loadLogs);
+
+refresh();
+setInterval(refresh, 5000);
+</script>

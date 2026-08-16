@@ -3,6 +3,7 @@
 #
 #   shield-config resolve [-f FILE|--from-env]   full KEY=VALUE environment
 #   shield-config show    [SERVICE] [-f FILE]    effective values + where each came from
+#                         --porcelain            same, as SOURCE<TAB>KEY<TAB>VALUE
 #   shield-config diff    [SERVICE] [-f FILE]    only what you have overridden
 #   shield-config levels                         available presets
 #   shield-config action-env [-f FILE|--from-env] assignments the fail2ban action needs
@@ -62,7 +63,7 @@ LEVELS="strict default loose"
 die() { echo "shield-config: $*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -216,6 +217,7 @@ SERVICE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -f|--file)  ENV_FILE=${2:?-f needs a path}; shift 2 ;;
+        --porcelain) PORCELAIN=yes; shift ;;
         --from-env) FROM_ENV=yes; shift ;;
         --shell)    SHELL_OUT=yes; shift ;;
         -h|--help)  usage 0 ;;
@@ -224,6 +226,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 SHELL_OUT=${SHELL_OUT:-no}
+PORCELAIN=${PORCELAIN:-no}
 
 CUSTOM_FILE=$(mktemp)
 trap 'rm -f "$CUSTOM_FILE"' EXIT INT TERM
@@ -278,6 +281,18 @@ resolve)
     done
     ;;
 show)
+    # Machine-readable: SOURCE<TAB>KEY<TAB>VALUE, one per line. Value is
+    # last so it may contain anything, including a tab — a consumer
+    # splits on the first two separators only. Used by the read-only UI
+    # so it never has to reimplement preset resolution.
+    if [ "$PORCELAIN" = yes ]; then
+        resolve_all | filter_service | while IFS= read -r _line; do
+            k=${_line%%"$TAB"*}; _rest=${_line#*"$TAB"}
+            v=${_rest%"$TAB"*}; src=${_rest##*"$TAB"}
+            printf '%s\t%s\t%s\n' "$src" "$k" "$v"
+        done
+        exit 0
+    fi
     if [ -n "$SERVICE" ]; then
         printf 'service %s   preset %s\n\n' "$SERVICE" "$(level_for "$SERVICE")"
     else

@@ -18,6 +18,8 @@ PREFIX ?= /usr/local
 # a GLIBC_x.yz loader error. Static removes the coupling entirely and works
 # on any base image, including Alpine.
 GUARD_TARGET ?= $(shell uname -m)-unknown-linux-musl
+UI_BIN := ui/target/$(GUARD_TARGET)/release/shield-ui
+UI_BIN_NATIVE := ui/target/release/shield-ui
 GUARD_BIN := guard/target/$(GUARD_TARGET)/release/fips-guard
 GUARD_BIN_NATIVE := guard/target/release/fips-guard
 
@@ -72,7 +74,7 @@ lint: ## shellcheck + rustfmt + clippy
 validate: ## static: render every profile, nginx -t, fail2ban -t
 	test/validate.sh
 
-.PHONY: test-ws test-ban test-tcp test-http test-multiprofile test-guard test-guard-sidecar test-filters
+.PHONY: test-ws test-ban test-tcp test-http test-multiprofile test-ui test-guard test-guard-sidecar test-filters
 test-ws: ## behavioral: WebSocket message policy
 	test/ws_smoke.sh
 test-ban: ## behavioral: detection -> enforcement loop
@@ -83,6 +85,29 @@ test-http: ## behavioral: generic HTTP profile
 	test/http_smoke.sh
 test-multiprofile: ## behavioral: per-profile limits stay isolated from each other
 	test/multiprofile_smoke.sh
+test-ui: ## behavioral: read-only dashboard serves and refuses what it should
+	test/ui_smoke.sh
+
+.PHONY: ui install-ui
+ui: ## build the read-only status dashboard (static, same musl target as the guard)
+	@rustup target list --installed 2>/dev/null | grep -qx '$(GUARD_TARGET)' || { \
+	    echo "missing target $(GUARD_TARGET). Install it with:"; \
+	    echo "    rustup target add $(GUARD_TARGET)"; \
+	    exit 1; \
+	}
+	cargo build --release --target $(GUARD_TARGET) --manifest-path ui/Cargo.toml
+	@echo "built $(UI_BIN)"
+
+install-ui: ## install the dashboard and its systemd unit (needs root)
+	@bin="$(UI_BIN)"; \
+	[ -x "$$bin" ] || bin="$(UI_BIN_NATIVE)"; \
+	test -x "$$bin" || { echo "no built shield-ui; run 'make ui' first"; exit 1; }; \
+	install -m 755 "$$bin" /usr/local/bin/shield-ui
+	install -m 644 deploy/host/shield-ui.service /etc/systemd/system/
+	@echo
+	@echo "now: systemctl daemon-reload && systemctl enable --now shield-ui"
+	@echo "then, from your workstation:"
+	@echo "     ssh -N -L 8088:127.0.0.1:8088 <node>   # open localhost:8088"
 
 .PHONY: show diff levels
 show: ## effective config and where each value came from (SERVICE=http to narrow)
@@ -99,7 +124,7 @@ test-filters: ## detection: fail2ban filters match real log lines
 	test/filters_test.sh
 
 .PHONY: test
-test: validate test-filters test-ws test-ban test-tcp test-http test-multiprofile test-guard test-guard-sidecar ## run the full suite
+test: validate test-filters test-ws test-ban test-tcp test-http test-multiprofile test-ui test-guard test-guard-sidecar ## run the full suite
 
 .PHONY: install
 install: ## host mode: render configs, install detection + guard (needs root)

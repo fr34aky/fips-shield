@@ -1,0 +1,15 @@
+[package]
+name = "shield-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only status dashboard for fips-shield"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
