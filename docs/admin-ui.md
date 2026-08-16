@@ -31,6 +31,19 @@ The port is published on `127.0.0.1:8088` only. Publishing it as
 `8088:8088` instead would expose it on every interface including
 `fips0`, which hands a mesh peer the shield's own view of itself.
 
+**Stop a host-mode dashboard first.** If `shield-ui.service` is running,
+it holds `127.0.0.1:8088` and the container cannot bind it. `compose up`
+reports `address already in use`, and the container is left in `Created`
+— **not** started, and `restart: unless-stopped` will not retry it,
+because that only applies to containers that started once. Freeing the
+port later does not help on its own; you have to run `up -d` again.
+
+```sh
+sudo systemctl disable --now shield-ui        # if you installed it on the host
+docker compose -f compose.yaml -f compose.ui.yaml up -d --build
+docker compose -f compose.yaml -f compose.ui.yaml ps -a shield-ui   # expect Up, not Created
+```
+
 ### Host mode
 
 ```sh
@@ -99,6 +112,7 @@ because the causes need different fixes:
 | `no shield.env found` | started in `/` with nothing to read | set `SHIELD_UI_ENV_FILE` in `/etc/default/shield-ui` |
 | a permission error from `fips-guard` | the unit has no `CAP_BPF`, so the pinned maps cannot be opened | see below |
 | everything resolves, but Logs and Bans are empty | host mode against a container deployment | use the compose overlay instead |
+| nothing listening on 8088, container shows `Created` | the port was in use when it tried to start (usually a host-mode `shield-ui.service`) | free the port, then `docker compose ... up -d` again — it will not retry by itself |
 
 To reproduce what the service sees, drop the capabilities the way the
 unit does:
