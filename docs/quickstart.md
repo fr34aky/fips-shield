@@ -266,11 +266,16 @@ docker compose -f compose.yaml -f compose.guard.yaml up -d
 > sidecar open every BPF map on the machine. That is a real trade, and
 > the file backend is a perfectly good alternative.
 
-Two known rough edges, both open findings:
+A custom `SHIELD_GUARD_PIN_DIR` works in both deploy modes: set it in
+`shield.env` and the installer passes it through to the fail2ban action.
+Confirm with:
 
-- **Host mode: keep the default pin directory.**
-  `SHIELD_GUARD_PIN_DIR` never reaches the fail2ban action there, so a
-  custom path makes every ban fail.
+```sh
+grep actionban /etc/fail2ban/action.d/fips-shield.conf
+```
+
+One known rough edge:
+
 - **`fips-guard check` is not a health check.** It reads the pinned
   maps, which outlive the classifier, so it reports "banned" even if the
   tc filter has been detached and nothing is being enforced. Rising
