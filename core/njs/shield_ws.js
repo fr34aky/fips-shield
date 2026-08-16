@@ -58,6 +58,18 @@ var DEFAULT_TYPES = 'EVENT,REQ,CLOSE,COUNT,AUTH,NEG-OPEN,NEG-MSG,NEG-CLOSE';
 var MAX_PENDING_FRAMES = 256;
 var MAX_FRAGMENTS = 64;
 
+// Reads, not bytes, are what this engine costs: every filter callback
+// pays interpreter overhead, and the attacker picks the segment size.
+// A byte-at-a-time handshake is ~300us of worker CPU per byte — three
+// orders of magnitude above the same traffic through a profile with no
+// js_filter — and stays under every byte-denominated cap, so nothing
+// used to notice. Capping reads per phase bounds the cost AND emits a
+// verdict, which is what lets the detection engine ban the source.
+// A conforming client needs one or two reads for a handshake; a 128 KB
+// message arrives in ~90 segments at a typical MSS.
+var DEFAULT_MAX_HS_READS = 32;
+var MIN_MSG_READS = 64;
+
 // All knobs come from the port-keyed policy string (see
 // core/njs/shield_core.js): per-server js_var values are global by
 // name in nginx and would leak between profiles.
@@ -71,12 +83,100 @@ function readCfg(s) {
         maxSubs: num(p.ws_max_subs, 20),
         maxFilters: num(p.ws_max_filters, 10),
         maxFilterItems: num(p.ws_max_filter_items, 500),
+        maxLimit: num(p.ws_max_limit, 5000),
+        maxFilterValue: num(p.ws_max_filter_value, 512),
+        // Strict unless explicitly disabled: an absent knob must not
+        // silently mean "allow unbounded queries".
+        requireNarrowing: p.ws_require_narrowing !== 'false',
+        maxHsReads: num(p.ws_max_hs_reads, DEFAULT_MAX_HS_READS),
+        // Scaled off the message-size cap so raising one does not
+        // silently start cutting legitimate large messages.
+        maxMsgReads: num(p.ws_max_msg_reads,
+                         Math.ceil(num(p.ws_max_msg, 131072) / 1024) +
+                         MIN_MSG_READS),
         bMsg: bucket(num(p.ws_msg_rate, 20), num(p.ws_msg_burst, 100)),
         bEvent: bucket(num(p.ws_event_rate, 5), num(p.ws_event_burst, 50)),
         bReq: bucket(num(p.ws_req_rate, 5), num(p.ws_req_burst, 20)),
         types: keyset(p.nostr_types, DEFAULT_TYPES),
         kindDeny: keyset(p.nostr_kind_deny, '')
     };
+}
+
+// Keys that constrain which events a filter selects. A filter carrying
+// none of them asks the relay for everything it has — and the
+// item-count metric scores that ZERO, because it measures how
+// enumerated a query is, not how selective. The list is deliberately
+// generous (every standard NIP-01 selector, NIP-50 search, and any
+// "#x" tag filter), so the only thing it rejects is a filter that
+// narrows nothing at all.
+var NARROWING = ['ids', 'authors', 'kinds', 'since', 'until', 'search'];
+
+function isNarrowing(ks) {
+    for (var i = 0; i < ks.length; i++) {
+        if (ks[i].charAt(0) === '#' || NARROWING.indexOf(ks[i]) >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Shared by REQ, COUNT and NEG-OPEN. Returns true when it has closed
+// the session, in which case the caller must stop immediately.
+function checkFilters(s, cfg, st, filters) {
+    var nFilters = filters.length;
+    if (nFilters < 1) {
+        violate(s, cfg, st, 'filter-complexity', 'no-filter');
+        return true;
+    }
+    if (nFilters > cfg.maxFilters) {
+        violate(s, cfg, st, 'filter-complexity', 'filters=' + nFilters);
+        return true;
+    }
+    var items = 0;
+    for (var i = 0; i < nFilters; i++) {
+        var f = filters[i];
+        if (typeof f !== 'object' || f === null || Array.isArray(f)) {
+            violate(s, cfg, st, 'malformed', 'bad-filter');
+            return true;
+        }
+        var ks = Object.keys(f);
+        if (cfg.requireNarrowing && !isNarrowing(ks)) {
+            violate(s, cfg, st, 'filter-complexity', 'unbounded-filter');
+            return true;
+        }
+        // "limit" was never inspected at any value, so one message
+        // could ask for ten million events and score three items.
+        if (typeof f.limit === 'number' && f.limit > cfg.maxLimit) {
+            violate(s, cfg, st, 'filter-complexity', 'limit=' + f.limit);
+            return true;
+        }
+        items += ks.length;
+        for (var k = 0; k < ks.length; k++) {
+            var v = f[ks[k]];
+            if (Array.isArray(v)) {
+                items += v.length;
+                for (var j = 0; j < v.length; j++) {
+                    if (typeof v[j] === 'string' &&
+                        v[j].length > cfg.maxFilterValue) {
+                        violate(s, cfg, st, 'filter-complexity',
+                                'value-len=' + v[j].length);
+                        return true;
+                    }
+                }
+            } else if (typeof v === 'string' &&
+                       v.length > cfg.maxFilterValue) {
+                // A 100 KB "search" term is one key and one item.
+                violate(s, cfg, st, 'filter-complexity',
+                        'value-len=' + v.length);
+                return true;
+            }
+        }
+    }
+    if (items > cfg.maxFilterItems) {
+        violate(s, cfg, st, 'filter-complexity', 'items=' + items);
+        return true;
+    }
+    return false;
 }
 
 function bucket(rate, burst) {
@@ -99,8 +199,13 @@ function takeToken(b) {
 // recognised — not to accept them, but so a bare-LF request is
 // detected here instead of being forwarded uninspected while this
 // sniffer waits forever for a CRLF pair that never comes.
-function headerBlockEnd(buf) {
-    for (var i = 0; i + 1 < buf.length; i++) {
+// `from` lets the caller skip bytes already scanned on earlier reads:
+// rescanning the whole buffer every time made a byte-at-a-time
+// handshake quadratic on top of the per-read cost. Callers must start
+// two bytes back so a "\n\r\n" terminator split across reads is still
+// found.
+function headerBlockEnd(buf, from) {
+    for (var i = from || 0; i + 1 < buf.length; i++) {
         if (buf[i] !== 0x0a) {
             continue;
         }
@@ -158,6 +263,8 @@ function violate(s, cfg, st, rule, detail) {
     st.killed = true;
     st.pending = [];
     st.msgParts = [];
+    st.chunks = [];
+    st.pendingLen = 0;
     core.verdict(s, cfg.service, 'ws', rule, detail);
     var notice = JSON.stringify(['NOTICE', 'fips-shield: connection closed: ' + rule]);
     s.sendDownstream(wsFrame(OP_TEXT, Buffer.from(notice), false));
@@ -214,26 +321,8 @@ function inspect(s, cfg, st, buf) {
         if (typeof sid !== 'string' || sid.length < 1 || sid.length > 64) {
             return violate(s, cfg, st, 'malformed', 'bad-subscription-id');
         }
-        var nFilters = msg.length - 2;
-        if (nFilters > cfg.maxFilters) {
-            return violate(s, cfg, st, 'filter-complexity', 'filters=' + nFilters);
-        }
-        var items = 0;
-        for (var i = 2; i < msg.length; i++) {
-            var f = msg[i];
-            if (typeof f !== 'object' || f === null || Array.isArray(f)) {
-                return violate(s, cfg, st, 'malformed', 'bad-filter');
-            }
-            var ks = Object.keys(f);
-            items += ks.length;
-            for (var k = 0; k < ks.length; k++) {
-                if (Array.isArray(f[ks[k]])) {
-                    items += f[ks[k]].length;
-                }
-            }
-        }
-        if (items > cfg.maxFilterItems) {
-            return violate(s, cfg, st, 'filter-complexity', 'items=' + items);
+        if (checkFilters(s, cfg, st, msg.slice(2))) {
+            return;
         }
         if (t === 'REQ' && !(sid in st.subs)) {
             if (st.subCount >= cfg.maxSubs) {
@@ -242,7 +331,36 @@ function inspect(s, cfg, st, buf) {
             st.subs[sid] = true;
             st.subCount++;
         }
-    } else if (t === 'CLOSE') {
+    } else if (t === 'NEG-OPEN') {
+        // Negentropy reconciliation is the most expensive operation the
+        // relay offers, and NEG-OPEN carries a filter in msg[2]. It
+        // used to fall through to the general message bucket with no
+        // filter inspection and no subscription accounting whatsoever —
+        // the query-cost model simply did not apply to it.
+        if (!takeToken(cfg.bReq)) {
+            return violate(s, cfg, st, 'req-rate');
+        }
+        var nsid = msg[1];
+        if (typeof nsid !== 'string' || nsid.length < 1 || nsid.length > 64) {
+            return violate(s, cfg, st, 'malformed', 'bad-subscription-id');
+        }
+        if (checkFilters(s, cfg, st, [msg[2]])) {
+            return;
+        }
+        if (!(nsid in st.subs)) {
+            if (st.subCount >= cfg.maxSubs) {
+                return violate(s, cfg, st, 'too-many-subs', 'max=' + cfg.maxSubs);
+            }
+            st.subs[nsid] = true;
+            st.subCount++;
+        }
+    } else if (t === 'AUTH') {
+        // Costs the relay a schnorr verification, so price it like a
+        // publish rather than under the loose message bucket.
+        if (!takeToken(cfg.bEvent)) {
+            return violate(s, cfg, st, 'event-rate');
+        }
+    } else if (t === 'CLOSE' || t === 'NEG-CLOSE') {
         if (typeof msg[1] === 'string' && msg[1] in st.subs) {
             delete st.subs[msg[1]];
             if (st.subCount > 0) {
@@ -250,7 +368,8 @@ function inspect(s, cfg, st, buf) {
             }
         }
     }
-    // AUTH and NEG-* pass under the overall message-rate bucket.
+    // NEG-MSG passes under the overall message-rate bucket: it carries
+    // reconciliation payload for a session NEG-OPEN already accounted.
 }
 
 // Parse as many complete frames out of st.acc as available. Data
@@ -259,7 +378,10 @@ function inspect(s, cfg, st, buf) {
 function pump(s, cfg, st) {
     while (!st.killed) {
         var acc = st.acc;
+        // Every "wait for more" exit records what it is waiting for, so
+        // onData() can buffer segments without re-concatenating.
         if (acc.length < 2) {
+            st.need = 2;
             return;
         }
         var b0 = acc[0];
@@ -276,12 +398,14 @@ function pump(s, cfg, st) {
         var off = 2;
         if (len === 126) {
             if (acc.length < 4) {
+                st.need = 4;
                 return;
             }
             len = acc.readUInt16BE(2);
             off = 4;
         } else if (len === 127) {
             if (acc.length < 10) {
+                st.need = 10;
                 return;
             }
             if (acc.readUInt32BE(2) !== 0) {
@@ -314,8 +438,10 @@ function pump(s, cfg, st) {
         }
         var end = off + 4 + len;
         if (acc.length < end) {
+            st.need = end;
             return;
         }
+        st.need = 2;
         var raw = acc.slice(0, end);
         var key = acc.slice(off, off + 4);
         var payload = Buffer.from(acc.slice(off + 4, end));
@@ -346,6 +472,9 @@ function pump(s, cfg, st) {
                 var msgBuf = Buffer.concat(st.msgParts);
                 st.msgParts = [];
                 st.msgLen = 0;
+                // The read budget is per message, not per connection:
+                // a long-lived client sending many messages is fine.
+                st.msgReads = 0;
                 inspect(s, cfg, st, msgBuf);
                 if (!st.killed) {
                     flush(s, st);
@@ -376,6 +505,13 @@ function onData(s, cfg, st, data, flags) {
     }
     if (st.mode === 'handshake') {
         if (data.length > 0) {
+            // Priced in reads, not bytes: see the note on
+            // DEFAULT_MAX_HS_READS. This is the cap that turns a
+            // byte-at-a-time drip from an unbounded, undetectable CPU
+            // sink into a verdict the detection engine can ban on.
+            if (++st.hsReads > cfg.maxHsReads) {
+                return violate(s, cfg, st, 'protocol', 'handshake-drip');
+            }
             st.hs = Buffer.concat([st.hs, data]);
             if (st.hs.length > MAX_HANDSHAKE) {
                 return violate(s, cfg, st, 'oversized-handshake');
@@ -384,7 +520,8 @@ function onData(s, cfg, st, data, flags) {
             // been seen and validated: forwarding a partial handshake
             // would let the http stage act on bytes this sniffer has
             // not classified yet.
-            var end = headerBlockEnd(st.hs);
+            var end = headerBlockEnd(st.hs, st.hsScanned - 2);
+            st.hsScanned = st.hs.length;
             if (end < 0) {
                 return;
             }
@@ -418,7 +555,25 @@ function onData(s, cfg, st, data, flags) {
             }
         }
     } else if (data.length > 0) {
-        st.acc = Buffer.concat([st.acc, data]);
+        if (++st.msgReads > cfg.maxMsgReads) {
+            return violate(s, cfg, st, 'frame-flood', 'message-drip');
+        }
+        // Hold arriving segments unmaterialised until there are enough
+        // bytes for pump() to make progress. Rebuilding the whole
+        // accumulator on every read copied the entire pending frame
+        // each time, so a byte-at-a-time 128 KB message cost gigabytes
+        // of memcpy; st.need is the byte count pump() last said it was
+        // waiting for.
+        st.chunks.push(data);
+        st.pendingLen += data.length;
+        if (st.acc.length + st.pendingLen < st.need) {
+            return;
+        }
+        st.acc = st.acc.length === 0 && st.chunks.length === 1
+            ? st.chunks[0]
+            : Buffer.concat([st.acc].concat(st.chunks));
+        st.chunks = [];
+        st.pendingLen = 0;
         pump(s, cfg, st);
     }
     if (flags.last && !st.killed) {
@@ -433,7 +588,15 @@ function filter(s) {
     var st = {
         mode: 'handshake',
         hs: Buffer.from(''),
+        hsReads: 0,
+        hsScanned: 0,
         acc: Buffer.from(''),
+        // Arrived-but-not-yet-materialised segments, and the byte count
+        // pump() is waiting for before it can parse further.
+        chunks: [],
+        pendingLen: 0,
+        need: 2,
+        msgReads: 0,
         pending: [],
         msgParts: [],
         msgLen: 0,

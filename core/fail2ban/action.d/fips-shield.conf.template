@@ -15,6 +15,16 @@
 [Definition]
 actionstart =
 actionstop =
-actioncheck =
+# Not empty any more. fail2ban treats a failing actioncheck as "the
+# action is broken": it invalidates the ban epoch, after which every
+# live ticket is re-applied. That is the self-healing path, and an
+# empty actioncheck disables it — so a banlist lost to a tmpfs reboot,
+# or an eBPF classifier that has been detached, was never repaired.
+#
+# Both backends implement "health" cheaply: the file backend checks the
+# banlist directory is writable, the eBPF backend checks the watchdog
+# heartbeat is fresh (it cannot check the attachment directly from the
+# sidecar, which has no network namespace of its own).
+actioncheck = SHIELD_BAN_FILE=${SHIELD_BAN_FILE} /usr/local/bin/shield-ban health
 actionban = SHIELD_BAN_FILE=${SHIELD_BAN_FILE} SHIELD_BAN_ALSO_FILE=${SHIELD_BAN_ALSO_FILE} /usr/local/bin/shield-ban ban <ip> <bantime>
 actionunban = SHIELD_BAN_FILE=${SHIELD_BAN_FILE} SHIELD_BAN_ALSO_FILE=${SHIELD_BAN_ALSO_FILE} /usr/local/bin/shield-ban unban <ip>

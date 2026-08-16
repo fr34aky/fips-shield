@@ -1,0 +1,20 @@
+# Runs the guard watchdog every minute.
+#
+# The interval sets two things: how long enforcement can silently be
+# off before it is repaired, and how fresh the heartbeat stays. Keep it
+# comfortably below the staleness limit that `fips-guard health` uses
+# (default 180s, SHIELD_GUARD_MAX_AGE), or fail2ban's actioncheck will
+# report the backend unhealthy between runs.
+
+[Unit]
+Description=Run the fips-shield eBPF guard watchdog every minute
+Documentation=file:/usr/share/doc/fips-shield/guard/README.md
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Unit=fips-guard-watchdog.service
+
+[Install]
+WantedBy=timers.target

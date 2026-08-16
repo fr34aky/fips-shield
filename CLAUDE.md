@@ -22,13 +22,15 @@ make test-http           # generic HTTP profile
 make test-guard          # eBPF guard (privileged, Linux)
 make test-guard-sidecar  # containerized fail2ban banning via guard maps
 make lint                # shellcheck + rustfmt + clippy (clippy runs with -D warnings)
-make guard               # build the eBPF guard (needs clang; build.rs compiles + embeds the BPF object)
+make guard               # build the eBPF guard, static (needs clang + the musl target)
+make guard-native        # glibc build; host-only, will NOT exec in the fail2ban sidecar
 ```
 
 Each `test-*` target is one script in `test/` — run the script directly to run a single test. The smoke tests build and run Docker containers; there is no unit-test framework. CI (`.github/workflows/ci.yml`) runs lint + validate + all smoke tests on every push.
 
 - shellcheck runs with `--exclude=SC2016` deliberately: the literal `${VAR}` lists handed to envsubst must not expand. Keep that exclusion.
 - Build the guard as your normal user, install as root (`make guard`, then `sudo make install-guard`) — rustup lives outside sudo's secure_path; the Makefile enforces this split on purpose.
+- The guard is built static (`rustup target add "$(uname -m)"-unknown-linux-musl`) because the same binary is bind-mounted into the debian:12 fail2ban sidecar. glibc is backward compatible but never forward, so a glibc build made on a newer host cannot exec there at all. Keep it static.
 
 ## Architecture
 
@@ -62,4 +64,4 @@ Two, kept equivalent: **container** (`deploy/container/` — shield + fail2ban s
 
 ## Docs
 
-`docs/README.md` is the index. Key ones when changing behavior: `guide.md` (user-facing operation), `verdict-schema.md` (frozen contracts), `writing-a-profile.md`, `plan.md` (roadmap, complete — see its Future section), `review-2026-07.md` (adversarial review; remaining medium/low findings listed there).
+`docs/README.md` is the index. Key ones when changing behavior: `quickstart.md` (minimal setup per profile — update it when a new *required* env key is added, since nginx refuses to start on a missing `${SHIELD_*}` placeholder), `guide.md` (user-facing operation), `verdict-schema.md` (frozen contracts), `writing-a-profile.md`, `plan.md` (roadmap, complete — see its Future section), `review-2026-07.md` (adversarial review; remaining medium/low findings listed there), `review-2026-08.md` (second review, all findings open — the shield bounds message shape but not the CPU or query cost a node can impose, and detection fires only on rule violations).

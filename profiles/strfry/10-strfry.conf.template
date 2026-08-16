@@ -10,6 +10,16 @@
 # relay protocol, or a NIP-11 info document when requested with
 # "Accept: application/nostr+json". Everything else is dropped.
 
+# This profile's own concurrency zone for the http stage. Never share
+# one with another profile: nginx counts per (zone, key), so the core
+# `shield_conn` zone this replaced made relay connections count against
+# the http profile's cap and vice versa.
+#
+# The http stage cannot discriminate by port the way the stream stage
+# can — it listens on a unix socket, where $server_port is empty — so a
+# separate zone is the only way to keep the counts apart.
+limit_conn_zone $binary_remote_addr zone=shield_strfry_conn:${SHIELD_CONN_ZONE_SIZE};
+
 server {
     listen unix:${SHIELD_SOCKET_DIR}/strfry.sock proxy_protocol;
     server_name ${SHIELD_SERVER_NAME};
@@ -34,7 +44,7 @@ server {
     keepalive_timeout 0;
 
     # Concurrent WebSocket connections per mesh node.
-    limit_conn shield_conn ${SHIELD_MAX_CONNS_PER_NODE};
+    limit_conn shield_strfry_conn ${SHIELD_MAX_CONNS_PER_NODE};
 
     location = / {
         # Handshake rate per mesh node. Established WebSockets are not

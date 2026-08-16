@@ -23,7 +23,19 @@ js_shared_dict_zone zone=shield_connrate:${SHIELD_CONNRATE_ZONE_SIZE} timeout=${
 
 # On a FIPS mesh a source address is a /128 derived from the node's key:
 # no NAT aliasing, no spoofing. Per-address limits are per-node limits.
-limit_conn_zone $binary_remote_addr zone=shield_stream_conn:${SHIELD_CONN_ZONE_SIZE};
+#
+# There is deliberately NO shared limit_conn zone here. Core used to
+# declare `shield_stream_conn` and every profile used it, which meant a
+# node's connections to one profile counted against another profile's
+# cap: 8 open relay WebSockets exceeded SHIELD_TCP_MAX_CONNS_PER_NODE=4
+# and refused SSH the node had not even connected to. nginx counts per
+# (zone, key), so sharing a zone shares the count no matter what limit
+# each server passes to limit_conn.
+#
+# Each profile therefore declares its own zone, next to the server that
+# uses it. See docs/writing-a-profile.md. A profile that still names
+# shield_stream_conn now fails `nginx -t` with "unknown limit_conn_zone"
+# rather than silently sharing a counter.
 
 # One line per session; "verdict" is non-empty when the engine refused
 # or closed it. Phase 3 consumes this alongside the per-verdict lines

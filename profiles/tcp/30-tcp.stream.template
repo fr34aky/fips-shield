@@ -11,6 +11,13 @@
 # core/njs/shield_core.js) — the profile is only a server block, which
 # is the point: adding a service means adding one of these.
 
+# This profile's own concurrency zone. Never share one with another
+# profile: nginx counts per (zone, key), so a shared zone makes a node's
+# relay connections count against this cap and refuse SSH it never
+# opened. The literal name (not ${SHIELD_TCP_SERVICE}) keeps it unique
+# even if two profiles are configured with the same service name.
+limit_conn_zone $binary_remote_addr zone=shield_tcp_stream_conn:${SHIELD_CONN_ZONE_SIZE};
+
 server {
     listen [${SHIELD_BIND_ADDR}]:${SHIELD_TCP_LISTEN_PORT};
 
@@ -24,7 +31,7 @@ server {
     js_var $shield_cfg_${SHIELD_TCP_LISTEN_PORT} 'service=${SHIELD_TCP_SERVICE};ban_file=${SHIELD_BAN_FILE};conn_rate=${SHIELD_TCP_CONN_RATE};conn_window=${SHIELD_CONN_WINDOW}';
     js_access shield_core.access;
 
-    limit_conn shield_stream_conn ${SHIELD_TCP_MAX_CONNS_PER_NODE};
+    limit_conn shield_tcp_stream_conn ${SHIELD_TCP_MAX_CONNS_PER_NODE};
 
     proxy_pass ${SHIELD_TCP_UPSTREAM};
     proxy_connect_timeout 5s;

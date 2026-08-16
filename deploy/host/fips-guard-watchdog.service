@@ -1,0 +1,35 @@
+# Re-attaches the fips-shield eBPF classifier if it has gone missing,
+# and publishes a heartbeat the detection engine can read.
+#
+# Why this exists: fips-guard.service is Type=oneshot with
+# RemainAfterExit=yes, so once ExecStart succeeds there is no process
+# left. Its Restart=on-failure therefore can never fire — nothing
+# notices if the tc filter disappears because the interface was
+# recreated, a driver was reloaded, or someone ran `tc filter del`.
+#
+# The failure mode this covers is quiet: the pinned maps outlive the
+# filter, so `fips-guard check` keeps answering "banned" and `list`
+# keeps listing while no packet is actually dropped.
+#
+# Started by fips-guard-watchdog.timer.
+
+[Unit]
+Description=fips-shield eBPF guard watchdog (re-attach + heartbeat)
+Documentation=file:/usr/share/doc/fips-shield/guard/README.md
+After=fips-guard.service
+# Nothing to watch if the guard was never loaded.
+Requisite=fips-guard.service
+PartOf=fips-guard.service
+
+[Service]
+Type=oneshot
+Environment=SHIELD_GUARD_IFACE=fips0
+EnvironmentFile=-/etc/default/fips-guard
+ExecStart=/usr/local/bin/fips-guard watchdog --iface ${SHIELD_GUARD_IFACE}
+
+# Needs to read the interface's filter list and, on repair, load and
+# attach a BPF program.
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes

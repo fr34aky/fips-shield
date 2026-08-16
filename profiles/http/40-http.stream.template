@@ -6,6 +6,11 @@
 # to the http stage (41-http.conf) on loopback via the PROXY protocol,
 # so request-level limits there still key on the peer's mesh address.
 
+# This profile's own concurrency zone for the stream stage. Never share
+# one with another profile: nginx counts per (zone, key), so a shared
+# zone lets connections to one service exhaust another service's cap.
+limit_conn_zone $binary_remote_addr zone=shield_http_stream_conn:${SHIELD_CONN_ZONE_SIZE};
+
 server {
     listen [${SHIELD_BIND_ADDR}]:${SHIELD_HTTP_LISTEN_PORT};
 
@@ -17,7 +22,7 @@ server {
     js_var $shield_cfg_${SHIELD_HTTP_LISTEN_PORT} 'service=${SHIELD_HTTP_SERVICE};ban_file=${SHIELD_BAN_FILE};conn_rate=${SHIELD_HTTP_CONN_RATE};conn_window=${SHIELD_CONN_WINDOW}';
     js_access shield_core.access;
 
-    limit_conn shield_stream_conn ${SHIELD_HTTP_MAX_CONNS_PER_NODE};
+    limit_conn shield_http_stream_conn ${SHIELD_HTTP_MAX_CONNS_PER_NODE};
 
     proxy_pass unix:${SHIELD_SOCKET_DIR}/${SHIELD_HTTP_SERVICE}.sock;
     proxy_protocol on;

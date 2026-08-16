@@ -48,6 +48,10 @@ jobs:
         run: test/tcp_smoke.sh
       - name: generic HTTP profile
         run: test/http_smoke.sh
+      # Every other behavioral test runs one profile alone, which is the
+      # one configuration in which shared limit state cannot be seen.
+      - name: per-profile limits stay isolated
+        run: test/multiprofile_smoke.sh
 
   guard:
     # Needs a privileged container and a kernel with BPF + BTF; the
@@ -57,6 +61,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: install clang (builds the BPF object)
         run: sudo apt-get update && sudo apt-get install -y clang
+      # The guard ships static, because the sidecar bind-mounts this
+      # exact binary and its glibc is older than the runner's. Without
+      # this the tests silently fall back to a glibc build, and the
+      # sidecar job fails on a loader error that says nothing about the
+      # code under test.
+      - name: install the musl target (the guard ships static)
+        run: rustup target add "$(uname -m)"-unknown-linux-musl
       - name: eBPF guard (drops, expiry, throttle)
         run: test/guard_smoke.sh
       - name: containerized fail2ban banning through the guard's maps

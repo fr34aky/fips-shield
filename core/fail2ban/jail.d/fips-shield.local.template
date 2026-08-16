@@ -39,6 +39,38 @@ bantime.maxtime = 1w
 ignoreip = ${SHIELD_F2B_IGNOREIP}
 ignoreself = ${SHIELD_F2B_IGNORESELF}
 
+[fips-shield-connrate]
+enabled = true
+filter = fips-shield-connrate
+logpath = /var/log/nginx/shield-error.log
+maxretry = ${SHIELD_F2B_CONNRATE_MAXRETRY}
+banaction = fips-shield
+backend = polling
+usedns = no
+findtime = ${SHIELD_F2B_FINDTIME}
+bantime = ${SHIELD_F2B_BANTIME}
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 1w
+ignoreip = ${SHIELD_F2B_IGNOREIP}
+ignoreself = ${SHIELD_F2B_IGNORESELF}
+
+[fips-shield-conn]
+enabled = true
+filter = fips-shield-conn
+logpath = /var/log/nginx/shield-*.stream.log
+maxretry = ${SHIELD_F2B_CONN_MAXRETRY}
+banaction = fips-shield
+backend = polling
+usedns = no
+findtime = ${SHIELD_F2B_FINDTIME}
+bantime = ${SHIELD_F2B_BANTIME}
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 1w
+ignoreip = ${SHIELD_F2B_IGNOREIP}
+ignoreself = ${SHIELD_F2B_IGNORESELF}
+
 [fips-shield-scan]
 enabled = true
 filter = fips-shield-scan

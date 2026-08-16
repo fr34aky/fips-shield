@@ -1,9 +1,15 @@
 # fips-shield documentation
 
-**New here? Start with the [user guide](guide.md).**
+**New here? Start with the [quick start](quickstart.md)** — one page,
+one to three edited config lines, from nothing to a protected service.
+Read the [user guide](guide.md) when you want to know why any of it
+works.
 
 ### Using it
 
+- **[Quick start](quickstart.md)** — the shortest path that works, for
+  each profile and for combinations, plus enabling the eBPF guard on
+  Debian and what to change when upgrading.
 - **[User guide](guide.md)** — what it protects against, how to install
   and run it (containers or host), every configuration option, and how
   to operate it day to day.
@@ -35,3 +41,6 @@
 - **[Code review, July 2026](review-2026-07.md)** — what the review
   found, what was fixed, the medium/low items still open, and the
   things verified as correct so they need not be re-litigated.
+- **[Code review, August 2026](review-2026-08.md)** — a second pass,
+  focused on cost rather than bypasses: what a node can spend inside
+  the limits without ever being detected. All items open.

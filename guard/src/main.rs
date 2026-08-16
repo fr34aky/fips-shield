@@ -111,6 +111,24 @@ enum Cmd {
     Throttle { rate: u64, burst: u64 },
     /// Packet counters and current configuration.
     Stats,
+    /// Report whether the classifier is still attached. Exit 1 if not.
+    Status {
+        #[arg(long, env = "SHIELD_GUARD_IFACE", default_value = DEFAULT_IFACE)]
+        iface: String,
+    },
+    /// Verify the attachment, re-attach if it is missing, and refresh
+    /// the heartbeat. Intended for fips-guard-watchdog.timer.
+    Watchdog {
+        #[arg(long, env = "SHIELD_GUARD_IFACE", default_value = DEFAULT_IFACE)]
+        iface: String,
+    },
+    /// Exit 1 if the watchdog heartbeat is missing or stale. Reads only
+    /// the pinned map, so it works from the detection sidecar, which
+    /// has no network namespace of its own.
+    Health {
+        #[arg(long, env = "SHIELD_GUARD_MAX_AGE", default_value_t = 180)]
+        max_age: u64,
+    },
 }
 
 fn now_mono_ns() -> u64 {
@@ -156,6 +174,138 @@ fn bans_map(pin_dir: &Path) -> Result<BpfHashMap<MapData, Addr6, BanVal>> {
         pin_dir,
         "shield_bans",
     )?))?)
+}
+
+fn health_map(pin_dir: &Path) -> Result<Array<MapData, u64>> {
+    Ok(Array::try_from(Map::Array(open_map(
+        pin_dir,
+        "shield_health",
+    )?))?)
+}
+
+/// Is our classifier still attached to `iface`?
+///
+/// This shells out to `tc` rather than dumping RTM_GETTFILTER over
+/// netlink ourselves. aya keeps its filter-lookup helper private
+/// (`qdisc_detach_program` uses it, but calling that as a probe would
+/// detach the very filter we are testing for), and hand-rolling the
+/// dump means ~200 lines of unsafe struct punning — `tcmsg` and the
+/// TCA_* constants are not in the libc crate — for something that runs
+/// once a minute on the host, outside the packet path. iproute2 is
+/// already required to have a mesh interface at all.
+///
+/// No shell is involved: arguments are passed as a vector, so there is
+/// no quoting or injection surface. Keeping this in one function means
+/// swapping in a netlink implementation later touches nothing else.
+fn classifier_attached(iface: &str) -> Result<bool> {
+    let out = std::process::Command::new("tc")
+        .args(["filter", "show", "dev", iface, "ingress"])
+        .output()
+        .context("cannot run `tc` (install iproute2) to check the attachment")?;
+    if !out.status.success() {
+        bail!(
+            "tc filter show dev {iface} ingress failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).contains(PROG_NAME))
+}
+
+fn write_heartbeat(pin_dir: &Path) -> Result<()> {
+    health_map(pin_dir)?
+        .set(0, now_epoch_s(), 0)
+        .context("cannot write the health heartbeat")?;
+    Ok(())
+}
+
+fn cmd_status(pin_dir: &Path, iface: &str) -> Result<bool> {
+    let attached = classifier_attached(iface)?;
+    if attached {
+        // Refresh the heartbeat so a manual run counts as a check.
+        let _ = write_heartbeat(pin_dir);
+        println!("attached: {PROG_NAME} is filtering ingress on {iface}");
+    } else {
+        // Deliberately loud. The failure this catches is one where
+        // everything else keeps looking healthy: the pinned maps
+        // outlive the filter, so `check` still answers "banned" and
+        // `list` still lists, while nothing is being dropped.
+        println!(
+            "NOT ATTACHED: no {PROG_NAME} filter on {iface} ingress — nothing is being enforced"
+        );
+    }
+    Ok(attached)
+}
+
+/// Check, repair if needed, then publish the heartbeat.
+///
+/// Repairing rather than only reporting is the point: the unit that
+/// loads the guard is Type=oneshot with RemainAfterExit, so its
+/// `Restart=on-failure` can never fire — there is no process to
+/// restart. Something has to notice and re-attach.
+fn cmd_watchdog(pin_dir: &Path, iface: &str) -> Result<()> {
+    if classifier_attached(iface)? {
+        write_heartbeat(pin_dir)?;
+        return Ok(());
+    }
+    eprintln!("watchdog: {PROG_NAME} is not attached to {iface}; re-attaching");
+
+    // Preserve the running throttle configuration across the reload.
+    // cmd_load() would otherwise reset it to the CLI defaults, quietly
+    // disabling a configured throttle every time the watchdog repairs.
+    let cfg = config_map(pin_dir)
+        .and_then(|m| Ok(m.get(&0, 0)?))
+        .unwrap_or(Config {
+            rate_pps: 0,
+            burst_pkts: 0,
+        });
+    cmd_load(pin_dir, iface, cfg.rate_pps, cfg.burst_pkts)?;
+
+    if !classifier_attached(iface)? {
+        bail!("re-attach to {iface} reported success but no filter is present");
+    }
+    write_heartbeat(pin_dir)?;
+    eprintln!("watchdog: re-attached to {iface}");
+    Ok(())
+}
+
+/// Staleness check against the heartbeat map only — no interface, no
+/// network namespace, no capabilities beyond map access. That is what
+/// makes it callable from the detection sidecar, which has neither a
+/// network nor a view of the mesh interface.
+///
+/// "Never ran" and "ran, then stopped" are deliberately not the same
+/// answer. Only the second is evidence that enforcement has stopped;
+/// the first is the default state of every install, because the
+/// watchdog timer is opt-in (`make install-guard` prints the enable
+/// line, it does not run it).
+///
+/// Reporting "never ran" as unhealthy is far worse than the missing
+/// signal, because fail2ban does not treat a failing actioncheck as
+/// information — it treats it as a broken action. It increments the
+/// jail's ban epoch (`Action.invalidateBanEpoch`) and re-applies every
+/// live ticket, so any unban is undone within seconds no matter which
+/// CLI performed it. It also refuses to unban at all while the check is
+/// failing: `_processCmd` runs `_beforeRepair`, which returns False for
+/// `<actionunban>` and logs "Invariant check failed. Unban is
+/// impossible." A backend that cannot prove it is healthy must not
+/// claim it is broken.
+fn cmd_health(pin_dir: &Path, max_age: u64) -> Result<bool> {
+    let last = health_map(pin_dir)?.get(&0, 0).unwrap_or(0);
+    if last == 0 {
+        eprintln!(
+            "note: no watchdog heartbeat yet, so a detached classifier would go \
+             unnoticed. Enable it with: systemctl enable --now fips-guard-watchdog.timer"
+        );
+        println!("unknown: no heartbeat yet (watchdog not running) — reporting healthy");
+        return Ok(true);
+    }
+    let age = now_epoch_s().saturating_sub(last);
+    if age > max_age {
+        println!("stale: last confirmed {age}s ago (limit {max_age}s) — enforcement is not known to be running");
+        return Ok(false);
+    }
+    println!("ok: attachment confirmed {age}s ago");
+    Ok(true)
 }
 
 fn config_map(pin_dir: &Path) -> Result<Array<MapData, Config>> {
@@ -274,6 +424,32 @@ fn set_config(pin_dir: &Path, rate: u64, burst: u64) -> Result<()> {
     Ok(())
 }
 
+/// Delete every entry whose ban has lapsed, returning how many went.
+///
+/// The BPF side only *checks* expiry, it never deletes — a lapsed entry
+/// simply stops matching. Nothing else reclaims them, and shield_bans is
+/// a fixed-size HASH rather than an LRU, so without this the map fills
+/// with corpses until `bpf_map_update_elem` starts returning E2BIG and
+/// no new node can be banned at all, host-wide, while `stats` still
+/// reports drops and everything looks healthy. A mesh identity is a
+/// keypair, so accumulating enough of them is cheap for an attacker.
+fn prune_expired(bans: &mut BpfHashMap<MapData, Addr6, BanVal>) -> Result<usize> {
+    let now = now_mono_ns();
+    let mut expired: Vec<Addr6> = Vec::new();
+    for entry in bans.iter() {
+        let (key, val) = entry?;
+        // 0 is permanent and never lapses.
+        if val.expires_mono_ns != 0 && val.expires_mono_ns <= now {
+            expired.push(key);
+        }
+    }
+    let n = expired.len();
+    for key in expired {
+        let _ = bans.remove(&key);
+    }
+    Ok(n)
+}
+
 fn cmd_ban(pin_dir: &Path, ip: &str, seconds: i64) -> Result<()> {
     let Some(addr) = parse_v6(ip)? else {
         eprintln!("note: {ip} is IPv4; the mesh is IPv6-only, nothing to do");
@@ -296,8 +472,25 @@ fn cmd_ban(pin_dir: &Path, ip: &str, seconds: i64) -> Result<()> {
             expires_epoch_s: now_epoch_s().saturating_add(secs),
         }
     };
-    bans.insert(Addr6 { b: addr.octets() }, val, 0)
-        .context("cannot insert ban")?;
+    let key = Addr6 { b: addr.octets() };
+    // A full map is the one failure that must not be terminal: fail2ban
+    // logs the error and does not retry, so a single E2BIG would end
+    // banning entirely until someone noticed. Reclaim the lapsed
+    // entries nothing else reclaims, then try once more. Retrying on
+    // any error rather than matching an errno keeps this robust to how
+    // the failure is reported.
+    if let Err(first) = bans.insert(key, val, 0) {
+        let reclaimed = prune_expired(&mut bans)
+            .context("ban failed and the expired-entry sweep also failed")?;
+        bans.insert(key, val, 0).with_context(|| {
+            format!(
+                "cannot insert ban (first attempt: {first}); swept {reclaimed} \
+                 expired entries and still could not insert — the ban map may \
+                 be full of active bans"
+            )
+        })?;
+        eprintln!("note: ban map was full; swept {reclaimed} expired entries");
+    }
     println!("banned {ip} until {}", val.expires_epoch_s);
     Ok(())
 }
@@ -308,9 +501,34 @@ fn cmd_unban(pin_dir: &Path, ip: &str) -> Result<()> {
         return Ok(());
     };
     let mut bans = bans_map(pin_dir)?;
-    // Unbanning something that is not banned is not an error.
-    let _ = bans.remove(&Addr6 { b: addr.octets() });
+    let key = Addr6 { b: addr.octets() };
+    let was_banned = bans.get(&key, 0).is_ok();
+    // Unbanning something that is not banned is not an error (the CLI
+    // contract is idempotent), but a delete that *fails* must not be
+    // reported as success. It used to be: the result was discarded, so
+    // an unban that changed nothing still printed "unbanned <ip>" and
+    // exited 0. fail2ban believes that exit code and drops its ticket,
+    // leaving the node banned in the kernel with nothing left tracking
+    // it — and the operator is told the unban worked.
+    if let Err(e) = bans.remove(&key) {
+        if was_banned {
+            return Err(e).with_context(|| format!("cannot remove the ban on {ip}"));
+        }
+    }
+    // Read back rather than trusting the delete. This is the assertion
+    // the whole command exists to make, and it costs one map lookup on
+    // a path that runs once per unban.
+    if bans.get(&key, 0).is_ok() {
+        bail!(
+            "unban of {ip} did not take: the entry is still in shield_bans. \
+             If fail2ban is running, it re-bans every live ticket whenever \
+             `actioncheck` fails — check `fips-guard health`."
+        );
+    }
     println!("unbanned {ip}");
+    if !was_banned {
+        eprintln!("note: {ip} was not banned in the guard; nothing to remove");
+    }
     Ok(())
 }
 
@@ -342,20 +560,15 @@ fn cmd_check(pin_dir: &Path, ip: &str) -> Result<bool> {
 
 fn cmd_list(pin_dir: &Path) -> Result<()> {
     let mut bans = bans_map(pin_dir)?;
+    prune_expired(&mut bans)?;
     let now = now_mono_ns();
-    let mut expired: Vec<Addr6> = Vec::new();
     let mut active: Vec<(Ipv6Addr, u64)> = Vec::new();
 
     for entry in bans.iter() {
         let (key, val) = entry?;
         if val.expires_mono_ns == 0 || val.expires_mono_ns > now {
             active.push((Ipv6Addr::from(key.b), val.expires_epoch_s));
-        } else {
-            expired.push(key);
         }
-    }
-    for key in expired {
-        let _ = bans.remove(&key);
     }
     for (ip, until) in active {
         // Permanent bans print 0, matching "no expiry".
@@ -384,8 +597,23 @@ fn cmd_stats(pin_dir: &Path) -> Result<()> {
     } else {
         println!("throttle           disabled");
     }
-    let bans = bans_map(pin_dir)?;
-    println!("bans               {}", bans.iter().count());
+    // Occupancy, not just a count: shield_bans is a fixed-size HASH, so
+    // a map filling up is the difference between "banning works" and
+    // "no new node can be banned at all", and it was previously
+    // invisible until the first failure.
+    // Capacity comes from the map itself rather than a constant
+    // duplicated from shield_guard.bpf.c, which would silently drift.
+    let md = open_map(pin_dir, "shield_bans")?;
+    let capacity = md.info().map(|i| i.max_entries()).unwrap_or(0);
+    let mut bans: BpfHashMap<MapData, Addr6, BanVal> = BpfHashMap::try_from(Map::HashMap(md))?;
+    let total = bans.iter().count();
+    let stale = prune_expired(&mut bans)?;
+    println!(
+        "bans               {}/{} active ({} expired reclaimed)",
+        total.saturating_sub(stale),
+        capacity,
+        stale
+    );
     Ok(())
 }
 
@@ -417,6 +645,18 @@ fn main() -> ExitCode {
             }
         }),
         Cmd::Stats => cmd_stats(pin_dir),
+        // status and health report through the exit code, like check.
+        Cmd::Status { iface } => match cmd_status(pin_dir, iface) {
+            Ok(true) => return ExitCode::SUCCESS,
+            Ok(false) => return ExitCode::FAILURE,
+            Err(e) => Err(e),
+        },
+        Cmd::Watchdog { iface } => cmd_watchdog(pin_dir, iface),
+        Cmd::Health { max_age } => match cmd_health(pin_dir, *max_age) {
+            Ok(true) => return ExitCode::SUCCESS,
+            Ok(false) => return ExitCode::FAILURE,
+            Err(e) => Err(e),
+        },
     };
 
     match result {

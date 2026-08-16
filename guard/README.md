@@ -32,17 +32,42 @@ Linux only. Kernel 5.4+ (developed against 6.8), `CAP_BPF` +
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
 ```
 
-Build needs a Rust toolchain and `clang` (compiles the BPF object;
-`build.rs` embeds it in the binary).
+Build needs a Rust toolchain, `clang` (compiles the BPF object;
+`build.rs` embeds it in the binary), and the musl target:
 
 ```sh
-cargo build --release          # -> target/release/fips-guard
-# or, from the repository root:
-make guard
+rustup target add x86_64-unknown-linux-musl    # once
+make guard                                     # from the repository root
+# -> guard/target/x86_64-unknown-linux-musl/release/fips-guard
 ```
 
 On Debian/Ubuntu/Mint the two packages are `clang` and `linux-libc-dev`
 (the latter provides `asm/types.h`, which `linux/bpf.h` includes).
+
+### Why the build is static
+
+The same binary file runs in two places: on the host under systemd, and
+inside the detection sidecar, which bind-mounts it rather than baking it
+into the image (so the writer and the classifier reading its maps can
+never be different versions).
+
+A dynamically linked build ties that file to the **build** host's glibc.
+glibc is backward compatible but never forward, so a guard built on a
+current distro needs at least that glibc version everywhere it runs —
+and the debian:12-based sidecar is older. The binary then fails to exec
+entirely, the sidecar refuses to start, and the deployment has detection
+with no enforcement. Building static removes the coupling: the binary
+depends on no libc but its own.
+
+`make guard-native` still produces a glibc build if you want one. It is
+fine for a host-only deployment and will not run in the sidecar;
+`make install-guard` warns when it installs one.
+
+Check what you have:
+
+```sh
+file /usr/local/bin/fips-guard     # want "static-pie linked"
+```
 
 The LLVM apt repository installs versioned binaries (`clang-19`,
 `clang-18`, …) with no unversioned `clang` symlink unless the `clang`
@@ -122,6 +147,13 @@ fips-guard list                        # "<ip> <until-epoch-seconds>"
 
 fips-guard stats                       # counters + current config
 fips-guard unload --iface fips0        # detach and unpin
+
+# is the classifier still attached? (exit 1 if not)
+fips-guard status --iface fips0
+# verify, re-attach if missing, refresh the heartbeat — the timer's job
+fips-guard watchdog --iface fips0
+# is enforcement known to be running? (what fail2ban's actioncheck calls)
+fips-guard health --max-age 180
 ```
 
 `ban`/`unban` here write only the kernel maps. Once fail2ban is driving
@@ -141,12 +173,45 @@ Attachment uses a classic netlink tc filter rather than TCX
 deliberately: a TCX link is owned by the process that created it and
 would disappear the moment the CLI exits.
 
+### The watchdog, and why `health` is lenient about a missing heartbeat
+
+`fips-guard.service` is `Type=oneshot` with `RemainAfterExit=yes`, so
+once it has attached the filter there is no process left and its
+`Restart=on-failure` can never fire. Nothing would notice a filter that
+disappeared — and the failure is silent, because the pinned maps outlive
+it: `check` keeps answering "banned" and `list` keeps listing while no
+packet is dropped. `fips-guard-watchdog.timer` closes that gap, once a
+minute, and records the result as a heartbeat that `health` can read
+from the sidecar (which has no network namespace of its own):
+
+```sh
+sudo systemctl enable --now fips-guard-watchdog.timer
+```
+
+`health` distinguishes two states that look alike and are not:
+
+| heartbeat | meaning | exit |
+|---|---|---|
+| never written | the timer was never enabled — nothing is *known* | 0, with a note |
+| older than `--max-age` | the timer ran and stopped — enforcement is not confirmed | 1 |
+
+The lenient answer for "never written" is deliberate. fail2ban treats a
+failing `actioncheck` as a broken action, not as missing information: it
+bumps the jail's ban epoch and re-applies every live ticket, and it
+refuses to unban at all while the check fails (`Invariant check failed.
+Unban is impossible.`). Since the timer is opt-in, a strict answer would
+put every install that skipped it into a permanent re-ban loop in which
+no node can be unbanned. A stale heartbeat is different — the timer ran,
+then stopped — and stays a hard failure, because that is the case
+fail2ban's re-apply is supposed to repair.
+
 ## Wiring it to the detection engine
 
 Install the wrapper as the backend fail2ban invokes:
 
 ```sh
-install -m 755 target/release/fips-guard /usr/local/bin/fips-guard
+install -m 755 target/"$(uname -m)"-unknown-linux-musl/release/fips-guard \
+    /usr/local/bin/fips-guard
 install -m 755 shield-ban /usr/local/bin/shield-ban
 ```
 
@@ -200,17 +265,44 @@ same jails, same filters, same action:
   attaching the classifier (`fips-guard load`) stays on the host under
   systemd, where `PartOf=fips.service` re-attaches it across daemon
   restarts. The container keeps `network_mode: none`.
+
+  Know what this grants before you enable it. **`CAP_BPF` is host-wide,
+  not shield-scoped.** It permits `BPF_MAP_GET_NEXT_ID` and
+  `BPF_MAP_GET_FD_BY_ID`, so a process holding it can enumerate and
+  open *every* BPF map on the machine — pinned or not, belonging to
+  this project or not — for read and write. You are granting that to
+  the container whose job is running a regex engine over
+  attacker-influenced log text. The rest of the overlay exists to keep
+  that container's blast radius small: it runs with `cap_drop: ALL`
+  plus `CAP_BPF` alone, `no-new-privileges`, and no network. If you are
+  not comfortable with the grant, use the file backend — the jails and
+  filters are identical either way.
 - **The host's `fips-guard` and `shield-ban`, bind-mounted read-only.**
   Mounting rather than baking them in means the container always runs
   exactly the guard the host runs — no version skew between the process
   writing the maps and the classifier reading them. It also means
   removing the overlay silently reverts to the image's file backend.
-- **bpffs mounted at `/mnt/bpf`, not `/sys/fs/bpf`.** AppArmor's
-  `docker-default` profile denies writes under `/sys/**`, so pinning
-  through a `/sys` path fails with `EACCES`. The profile matches the
-  path *inside* the container, so mounting bpffs elsewhere works with
-  default AppArmor and default seccomp — no `--privileged`, no
-  `security-opt`. `SHIELD_GUARD_PIN_DIR` points the CLI at it.
+- **The pin directory alone, read-only, at `/mnt/bpf/fips-shield`.**
+  Two deliberate narrowings from "mount bpffs":
+
+  Only `/sys/fs/bpf/fips-shield`, not all of `/sys/fs/bpf`: the latter
+  let the sidecar unlink *any* pin on the host, including every
+  `shield_*` pin — which silently discards every active ban — and any
+  other subsystem's.
+
+  Read-only, because it costs nothing: updating a map element is
+  checked against the map inode's own permissions, not the mount flags,
+  so ban and unban still work while creating and unlinking pins does
+  not. `test/guard_sidecar_smoke.sh` runs the sidecar in exactly this
+  configuration and asserts bans still reach the kernel, so the claim
+  is tested rather than assumed.
+
+  And `/mnt/bpf` rather than `/sys/fs/bpf`, because AppArmor's
+  `docker-default` profile denies writes under `/sys/**` and matches
+  the path *inside* the container — so mounting elsewhere works with
+  default AppArmor and default seccomp, no `--privileged` and no
+  `security-opt` overrides. `SHIELD_GUARD_PIN_DIR` points the CLI at
+  it.
 
 Because the image executes the host's binary, the sidecar is
 Debian-based: `fips-guard` links against glibc and cannot run on musl.

@@ -111,6 +111,25 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } shield_stats SEC(".maps");
 
+/* Liveness heartbeat: epoch seconds, written by "fips-guard watchdog"
+ * on the host each time it confirms the classifier is still attached.
+ *
+ * The classifier never touches this map. It exists because attachment
+ * cannot be checked from where it needs to be acted on: the detection
+ * sidecar runs with network_mode "none", so it has no view of the mesh
+ * interface and cannot ask whether a tc filter is attached. The pinned
+ * maps are the one channel that does reach it, so the host publishes
+ * the answer here and "fips-guard health" reads it. A stale value means
+ * enforcement is not known to be running.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, 1);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} shield_health SEC(".maps");
+
 static __always_inline void bump(__u32 slot)
 {
     __u64 *v = bpf_map_lookup_elem(&shield_stats, &slot);

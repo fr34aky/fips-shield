@@ -20,7 +20,50 @@
 
 import fs from 'fs';
 
-var banCache = { path: '', mtime: 0, size: -1, map: {} };
+// map is Object.create(null) throughout: it is indexed by a client
+// address, and on a plain object an inherited name like "constructor"
+// answers with a function, which the isNaN() fail-closed check in
+// isBanned() would then read as a ban.
+var banCache = { path: '', mtime: 0, size: -1, map: Object.create(null) };
+
+// Set by loadBans() when the banlist cannot be read at all. Reported by
+// access(), which has the session object needed to log.
+var banLoadFailed = false;
+
+function portOf(s) {
+    try {
+        return s.variables.server_port;
+    } catch (e) {
+        return '?';
+    }
+}
+
+// Log a configuration warning at most once per shared-dict entry
+// lifetime (SHIELD_CONNRATE_TIMEOUT, default 5 min).
+//
+// A module-level "already warned" flag does NOT work here: njs gives
+// each connection its own VM, so module state resets between
+// connections and the warning would be written once per connection —
+// into a log the fail2ban sidecar shares. The shared dict is the only
+// state that outlives a connection, and add() succeeding exactly once
+// per key lifetime is the gate. Re-warning every few minutes is also
+// better than truly once: a misconfiguration keeps reminding you.
+function warnPeriodically(s, key, msg) {
+    var dict = ngx.shared.shield_connrate;
+    if (!dict) {
+        return;
+    }
+    var first = false;
+    try {
+        first = dict.add(key, 1);
+    } catch (e) {
+        // Key exists (some njs versions throw rather than return false).
+        return;
+    }
+    if (first) {
+        s.warn(msg);
+    }
+}
 
 function num(v, dflt) {
     var n = parseFloat(v);
@@ -52,18 +95,20 @@ function loadBans(path) {
     try {
         st = fs.statSync(path);
     } catch (e) {
+        banLoadFailed = true;
         banCache.path = path;
         banCache.mtime = 0;
         banCache.size = -1;
-        banCache.map = {};
+        banCache.map = Object.create(null);
         return banCache.map;
     }
+    banLoadFailed = false;
     var mtime = st.mtimeMs !== undefined ? st.mtimeMs : Number(st.mtime);
     if (banCache.path === path && banCache.mtime === mtime &&
         banCache.size === st.size) {
         return banCache.map;
     }
-    var map = {};
+    var map = Object.create(null);
     try {
         var lines = fs.readFileSync(path, 'utf8').split('\n');
         for (var i = 0; i < lines.length; i++) {
@@ -88,8 +133,19 @@ function isBanned(ip, path) {
         return false;
     }
     var until = loadBans(path)[ip];
-    // Expiry is honoured here too, so a stale file cannot extend a ban.
-    return until !== undefined && until * 1000 > Date.now();
+    if (until === undefined) {
+        return false;
+    }
+    // A corrupt expiry must not read as "not banned": parseInt yields
+    // NaN, and every comparison against NaN is false, so the old code
+    // silently unbanned anyone whose line got mangled. Fail closed.
+    if (isNaN(until)) {
+        return true;
+    }
+    // 0 is a permanent ban (fail2ban's bantime = -1, written as 0 by
+    // the backend). Otherwise expiry is honoured here too, so a stale
+    // file cannot extend a ban past its "until".
+    return until === 0 || until * 1000 > Date.now();
 }
 
 // "shield-verdict" is the grep anchor for the detection engine; keep
@@ -113,6 +169,21 @@ function verdict(s, service, layer, rule, detail) {
 // Fixed-window connection counter. Windows are cheap and predictable;
 // a source that opens more than `rate` connections per window is
 // refused for the remainder of it.
+//
+// The key carries the listening port, not just the source address.
+// There is one shared dict for the whole shield, so an address-only key
+// made every profile increment and test THE SAME counter while each
+// compared it against its own conn_rate — the tightest rate then
+// governed all of them. Concretely: a node using the relay normally
+// (SHIELD_STRFRY_CONN_RATE=60) would blow past SHIELD_TCP_CONN_RATE=10
+// and lock itself out of SSH on the same host, having never opened an
+// SSH connection.
+//
+// Port is the right discriminator because two servers cannot listen on
+// the same address and port, so it is unique per listener by
+// construction — the same invariant the port-keyed policy js_var relies
+// on. The service name would not do: it comes from SHIELD_*_SERVICE and
+// two profiles can be set to the same string.
 function connRateExceeded(s, cfg) {
     if (!cfg.connRate) {
         return false;
@@ -122,7 +193,7 @@ function connRateExceeded(s, cfg) {
         return false;
     }
     var window = Math.floor(Date.now() / 1000 / cfg.connWindow);
-    var n = dict.incr(s.remoteAddress + ':' + window, 1, 0);
+    var n = dict.incr(portOf(s) + ':' + s.remoteAddress + ':' + window, 1, 0);
     return n > cfg.connRate;
 }
 
@@ -180,10 +251,34 @@ function access(s) {
     } catch (e) {
         // js_var not declared in this build of the config.
     }
-    if (cfg.banFile && isBanned(s.remoteAddress, cfg.banFile)) {
-        verdict(s, cfg.service, 'ban', 'banned', 'rejected-at-accept');
-        s.deny();
-        return;
+    // An empty ban_file disables ban enforcement entirely — at accept
+    // and, for profiles with a filter, mid-session too. That is a
+    // survivable state (the rate and concurrency limits still apply),
+    // so it must not refuse traffic; but it used to be completely
+    // silent, which is how a deployment can look healthy while
+    // enforcing nothing. Warn once per worker instead.
+    if (!cfg.banFile) {
+        warnPeriodically(s, '__shield_warn_nobanfile:' + portOf(s),
+                         'shield-config no ban_file for port ' + portOf(s) +
+                         ': BAN ENFORCEMENT IS DISABLED on this listener ' +
+                         '(is SHIELD_BAN_FILE set?)');
+    } else {
+        var banned = isBanned(s.remoteAddress, cfg.banFile);
+        // Report a banlist that cannot be read for the same reason: the
+        // engine falls back to "nobody is banned" and would otherwise
+        // do it without a word. Checked after isBanned(), which is what
+        // sets the flag.
+        if (banLoadFailed) {
+            warnPeriodically(s, '__shield_warn_banload:' + portOf(s),
+                             'shield-config banlist ' + cfg.banFile +
+                             ' is missing or unreadable: ban enforcement ' +
+                             'is inactive');
+        }
+        if (banned) {
+            verdict(s, cfg.service, 'ban', 'banned', 'rejected-at-accept');
+            s.deny();
+            return;
+        }
     }
     if (connRateExceeded(s, cfg)) {
         verdict(s, cfg.service, 'access', 'conn-rate', 'max=' + cfg.connRate);

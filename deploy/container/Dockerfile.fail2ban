@@ -5,12 +5,21 @@
 # Build from the repository root:
 #   docker build -f deploy/container/Dockerfile.fail2ban -t fips-shield-f2b .
 #
-# Debian rather than Alpine, deliberately. With the eBPF backend
-# (deploy/container/compose.guard.yaml) the host's fips-guard binary is
-# bind-mounted in and executed here, and that binary is linked against
-# glibc — it cannot run on musl. Keeping the base glibc means the same
-# binary works on the host and in this container, with no second build
-# target and no version skew between them.
+# With the eBPF backend (deploy/container/compose.guard.yaml) the host's
+# fips-guard binary is bind-mounted in and executed here, so it carries
+# the BUILD host's libc requirements into this image.
+#
+# Matching the base to glibc is NOT enough on its own, which cost a
+# production deployment: glibc is backward compatible but never forward,
+# so a guard built on a current distro (glibc 2.39) needs at least that
+# version here, and debian:12 has 2.36. The binary then does not exec at
+# all and fail2ban starts with no enforcement backend. `make guard`
+# therefore builds a static binary, which is independent of this image's
+# libc — and of whether it is glibc at all.
+#
+# The base stays Debian because fail2ban is the real payload and Debian
+# packages it with the Python version it is tested against; the static
+# guard just no longer depends on that choice.
 FROM debian:12-slim
 
 RUN apt-get update \

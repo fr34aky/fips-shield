@@ -36,6 +36,21 @@ if ! ping6 fd97:e2e::1; then
 fi
 echo "PASS baseline ping succeeds through the guard"
 
+# A freshly loaded guard has never run the watchdog, so the heartbeat is
+# zero. That is the default state of every install (the timer is opt-in;
+# `make install-guard` prints the enable line, it does not run it), and
+# it must NOT be reported as unhealthy. fail2ban does not read a failing
+# actioncheck as information — it reads it as a broken action, bumps the
+# jail's ban epoch and re-applies every live ticket, so every unban is
+# undone within seconds; while the check fails it also refuses to unban
+# at all ("Invariant check failed. Unban is impossible."). Checked here,
+# before anything has written a heartbeat.
+if ! fips-guard health --max-age 180 >/dev/null 2>&1; then
+    echo "FAIL a never-run watchdog must not be reported as unhealthy" >&2
+    exit 1
+fi
+echo "PASS health tolerates a watchdog that has never run"
+
 fips-guard ban fd97:e2e::2 60 >/dev/null
 if ping6 fd97:e2e::1; then
     echo "FAIL banned peer should not reach the host" >&2
@@ -62,6 +77,25 @@ if ! ping6 fd97:e2e::1; then
 fi
 echo "PASS unban restores reachability"
 
+# unban must not report success unless the entry is really gone. The
+# result of the delete used to be discarded, so an unban that changed
+# nothing still printed "unbanned <ip>" and exited 0 — and fail2ban
+# believes that exit code, drops its ticket, and leaves the node banned
+# in the kernel with nothing tracking it.
+if fips-guard check fd97:e2e::2 >/dev/null; then
+    echo "FAIL the entry survived an unban that reported success" >&2
+    exit 1
+fi
+echo "PASS unban actually removes the map entry"
+
+# Idempotent per the CLI contract: unbanning an unbanned address still
+# succeeds, so fail2ban's actionunban cannot fail on a double unban.
+if ! fips-guard unban fd97:e2e::2 >/dev/null 2>&1; then
+    echo "FAIL unbanning an unbanned address should succeed" >&2
+    exit 1
+fi
+echo "PASS unban is idempotent"
+
 # Bans must survive a reload of the program (pinned maps are reused).
 fips-guard ban fd97:e2e::2 60 >/dev/null
 fips-guard load --iface veth-host >/dev/null
@@ -75,12 +109,103 @@ if ping6 fd97:e2e::1; then
 fi
 echo "PASS bans survive a guard reload"
 
+# --- attachment visibility and self-repair -----------------------------
+#
+# The failure this covers is silent: the pinned maps outlive the tc
+# filter, so after a detach `check` still answers "banned" and `list`
+# still lists, while nothing is dropped at all. Nothing in the guard
+# used to be able to tell the difference, and the loader unit is
+# Type=oneshot + RemainAfterExit, so its Restart=on-failure can never
+# fire to repair it.
+if ! fips-guard status --iface veth-host >/dev/null; then
+    echo "FAIL status should report the classifier attached" >&2
+    exit 1
+fi
+echo "PASS status reports the classifier attached"
+
+fips-guard watchdog --iface veth-host >/dev/null
+if ! fips-guard health --max-age 60 >/dev/null; then
+    echo "FAIL health should be fresh right after the watchdog ran" >&2
+    exit 1
+fi
+echo "PASS watchdog publishes a heartbeat health can read"
+
+# Detach behind the guard's back, exactly as an interface recreation or
+# a stray `tc filter del` would.
+fips-guard ban fd97:e2e::2 60 >/dev/null
+tc filter del dev veth-host ingress 2>/dev/null || true
+if fips-guard status --iface veth-host >/dev/null; then
+    echo "FAIL status did not notice the filter was removed" >&2
+    exit 1
+fi
+echo "PASS status notices the filter was removed"
+
+# The point of the whole exercise: everything else still claims the
+# node is banned while its traffic now flows.
+if ! fips-guard check fd97:e2e::2 >/dev/null; then
+    echo "FAIL check should still report the ban (maps outlive the filter)" >&2
+    exit 1
+fi
+if ! ping6 fd97:e2e::1; then
+    echo "FAIL a detached filter should not be dropping anything" >&2
+    exit 1
+fi
+echo "PASS a detached classifier enforces nothing while check still says 'banned'"
+
+fips-guard watchdog --iface veth-host >/dev/null
+if ! fips-guard status --iface veth-host >/dev/null; then
+    echo "FAIL watchdog did not re-attach the classifier" >&2
+    exit 1
+fi
+if ping6 fd97:e2e::1; then
+    echo "FAIL banned peer reachable after the watchdog repaired the attachment" >&2
+    exit 1
+fi
+echo "PASS watchdog re-attaches and enforcement resumes"
+
+# The throttle config must survive the repair: a naive re-attach resets
+# it to the CLI defaults, silently disabling a configured throttle.
+fips-guard throttle 500 100 >/dev/null
+tc filter del dev veth-host ingress 2>/dev/null || true
+fips-guard watchdog --iface veth-host >/dev/null
+# Capture rather than pipe into `grep -q`: the guard restores default
+# SIGPIPE handling on purpose (so `list | head` ends quietly instead of
+# panicking), and `grep -q` closes the pipe on its first match — under
+# `set -o pipefail` that turns a *passing* check into a failed pipeline.
+throttle_now="$(fips-guard stats)"
+case "$throttle_now" in
+*"500 pkt/s"*) ;;
+*)
+    echo "FAIL watchdog reset the throttle configuration" >&2
+    echo "$throttle_now" >&2
+    exit 1
+    ;;
+esac
+echo "PASS watchdog preserves the throttle across a repair"
+fips-guard throttle 0 0 >/dev/null
+fips-guard unban fd97:e2e::2 >/dev/null
+
 fips-guard unload --iface veth-host >/dev/null
 if ! ping6 fd97:e2e::1; then
     echo "FAIL unload should leave traffic unfiltered" >&2
     exit 1
 fi
 echo "PASS unload leaves the interface unfiltered"
+
+# health must fail closed once the heartbeat goes stale, since that is
+# what tells fail2ban to re-apply its tickets. A heartbeat that exists
+# and has gone stale is real evidence enforcement stopped — unlike one
+# that was never written at all, checked above.
+#
+# The sleep is load-bearing: the staleness test is `age > max_age`, so
+# with --max-age 0 an age of 0 reads as fresh. Without it this assertion
+# only passes when the preceding commands happen to span a second.
+sleep 1
+if fips-guard health --max-age 0 >/dev/null; then
+    echo "FAIL health should report a stale heartbeat as unhealthy" >&2
+    exit 1
+fi
+echo "PASS health reports a stale heartbeat as unhealthy"
 
 ip netns del client
 ip link del veth-host

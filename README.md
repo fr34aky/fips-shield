@@ -12,9 +12,12 @@ method and path allowlists, body caps), and **tcp** (any plain TCP
 service — SSH, databases, game servers). Adding another service is
 usually one template file.
 
-> **📖 New here? Read the [user guide](docs/guide.md).** It covers
-> installation, configuration, and operation from scratch. To protect
-> something other than a Nostr relay, go straight to
+> **📖 New here? Start with the [quick start](docs/quickstart.md)** —
+> one page, one to three edited config lines, covering all three
+> profiles, combinations, and the eBPF guard on Debian. The
+> [user guide](docs/guide.md) is the longer reference: installation,
+> every configuration option, and day-to-day operation. To protect
+> something other than a Nostr relay, see
 > [protecting your own service](docs/protecting-your-service.md).
 
 ## Threat model
@@ -236,3 +239,8 @@ The roadmap in [docs/plan.md](docs/plan.md) is complete; see its
 (July 2026) is written up in
 [docs/review-2026-07.md](docs/review-2026-07.md): all critical and high
 findings are fixed, with the remaining medium/low items listed there.
+A second review (August 2026),
+[docs/review-2026-08.md](docs/review-2026-08.md), looks at cost rather
+than bypasses — what a node can spend while staying inside every
+configured limit, and therefore without ever being detected. Its
+findings are all open.

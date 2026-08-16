@@ -33,19 +33,21 @@ other profiles a deployment might enable at the same time.
 `profiles/myservice/40-myservice.stream.template`:
 
 ```nginx
+# Your own limit zone, declared outside the server block. Never share a
+# zone with another profile — see "Nothing may be shared by name" below.
+limit_conn_zone $binary_remote_addr zone=shield_myservice_stream_conn:${SHIELD_CONN_ZONE_SIZE};
+
 server {
     listen [${SHIELD_BIND_ADDR}]:${SHIELD_MYSERVICE_PORT};
 
     access_log /var/log/nginx/shield-myservice.stream.log shield_stream_json;
     error_log /var/log/nginx/shield-error.log warn;
 
-    js_var $shield_service myservice;
-    js_var $shield_ban_file '${SHIELD_BAN_FILE}';
-    js_var $shield_conn_rate ${SHIELD_MYSERVICE_CONN_RATE};
-    js_var $shield_conn_window ${SHIELD_CONN_WINDOW};
+    # One policy string, in a js_var named after the listening port.
+    js_var $shield_cfg_${SHIELD_MYSERVICE_PORT} 'service=myservice;ban_file=${SHIELD_BAN_FILE};conn_rate=${SHIELD_MYSERVICE_CONN_RATE};conn_window=${SHIELD_CONN_WINDOW}';
     js_access shield_core.access;
 
-    limit_conn shield_stream_conn ${SHIELD_MYSERVICE_MAX_CONNS};
+    limit_conn shield_myservice_stream_conn ${SHIELD_MYSERVICE_MAX_CONNS};
 
     proxy_pass ${SHIELD_MYSERVICE_UPSTREAM};
     proxy_timeout ${SHIELD_MYSERVICE_IDLE_TIMEOUT};
@@ -56,6 +58,29 @@ That block alone gets you ban enforcement (shared with every other
 profile and with the eBPF guard), per-node connection rate and
 concurrency limits, idle reaping, and structured logs the detection
 engine already knows how to read.
+
+## Nothing may be shared by name
+
+nginx has one global namespace for variables and one for limit zones,
+and a profile is not the unit of scoping in either. Two profiles that
+pick the same name do not get two of something — they get one, silently.
+Both mistakes have shipped here, and both were invisible until two
+profiles ran at once:
+
+| Thing | Shared-name failure | Rule |
+|---|---|---|
+| `js_var` | A plain `$shield_conn_rate` in two profiles resolves to whichever nginx parsed last, applying one profile's policy to both. | Name it `$shield_cfg_${...PORT}` and put the whole policy in that one string. |
+| `limit_conn_zone` / `limit_req_zone` | nginx counts per (zone, key). Sharing a zone shares the count, so a node's connections to one profile exhaust another's cap and the tightest limit governs everything. | Declare your own zone, named for the profile. |
+| njs shared dict | One dict serves the whole shield, so an address-only key merges every profile's counters. | Include `s.variables.server_port` in any key you add. |
+
+The port is the safe discriminator throughout: two servers cannot listen
+on the same address and port, so it is unique per listener by
+construction. A service name is not — it comes from `SHIELD_*_SERVICE`
+and two profiles can be configured with the same string.
+
+`test/multiprofile_smoke.sh` is the regression test for this; it enables
+two profiles with mismatched limits and asserts neither spends the
+other's budget.
 
 Then:
 

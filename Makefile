@@ -9,6 +9,18 @@ SHELL := /bin/bash
 ENV ?= shield.env
 PREFIX ?= /usr/local
 
+# The guard is built as a static musl binary by default, because the same
+# file has to run in two places: on the host (systemd) and inside the
+# detection sidecar, which bind-mounts it (deploy/container/compose.guard.yaml).
+# A glibc build links against the BUILD host's glibc, and glibc is backward
+# compatible but never forward — so a binary built on a current distro
+# will not exec in the debian:12-based sidecar, which fails at runtime with
+# a GLIBC_x.yz loader error. Static removes the coupling entirely and works
+# on any base image, including Alpine.
+GUARD_TARGET ?= $(shell uname -m)-unknown-linux-musl
+GUARD_BIN := guard/target/$(GUARD_TARGET)/release/fips-guard
+GUARD_BIN_NATIVE := guard/target/release/fips-guard
+
 .PHONY: help
 help:
 	@sed -n 's/^\([a-z-]*\):.*## \(.*\)/  \1\t\2/p' $(MAKEFILE_LIST) | expand -t22
@@ -19,8 +31,27 @@ images: ## build the shield and fail2ban container images
 	docker build -f deploy/container/Dockerfile.fail2ban -t fips-shield-f2b .
 
 .PHONY: guard
-guard: ## build the eBPF guard binary (Linux, needs clang)
+guard: ## build the eBPF guard binary, static (Linux, needs clang)
+	@rustup target list --installed 2>/dev/null | grep -qx '$(GUARD_TARGET)' || { \
+	    echo "Rust target $(GUARD_TARGET) is not installed."; \
+	    echo; \
+	    echo "The guard is built static so ONE binary runs both on the host"; \
+	    echo "and inside the detection sidecar, whose glibc is older than"; \
+	    echo "most build hosts'. Install the target with:"; \
+	    echo "    rustup target add $(GUARD_TARGET)"; \
+	    echo; \
+	    echo "If this host never runs the container-mode sidecar, a"; \
+	    echo "host-only build works too: make guard-native"; \
+	    exit 1; \
+	}
+	cargo build --release --target $(GUARD_TARGET) --manifest-path guard/Cargo.toml
+	@echo "built $(GUARD_BIN)"
+
+.PHONY: guard-native
+guard-native: ## build the guard against the host's glibc (host-only deployments)
 	cargo build --release --manifest-path guard/Cargo.toml
+	@echo "built $(GUARD_BIN_NATIVE) — NOT portable into the sidecar;"
+	@echo "use 'make guard' for container mode."
 
 .PHONY: lint
 lint: ## shellcheck + rustfmt + clippy
@@ -41,7 +72,7 @@ lint: ## shellcheck + rustfmt + clippy
 validate: ## static: render every profile, nginx -t, fail2ban -t
 	test/validate.sh
 
-.PHONY: test-ws test-ban test-tcp test-http test-guard test-guard-sidecar test-filters
+.PHONY: test-ws test-ban test-tcp test-http test-multiprofile test-guard test-guard-sidecar test-filters
 test-ws: ## behavioral: WebSocket message policy
 	test/ws_smoke.sh
 test-ban: ## behavioral: detection -> enforcement loop
@@ -50,6 +81,8 @@ test-tcp: ## behavioral: generic TCP profile
 	test/tcp_smoke.sh
 test-http: ## behavioral: generic HTTP profile
 	test/http_smoke.sh
+test-multiprofile: ## behavioral: per-profile limits stay isolated from each other
+	test/multiprofile_smoke.sh
 test-guard: ## behavioral: eBPF guard (privileged, Linux)
 	test/guard_smoke.sh
 test-guard-sidecar: ## behavioral: containerized fail2ban banning via the guard's maps (Linux)
@@ -58,7 +91,7 @@ test-filters: ## detection: fail2ban filters match real log lines
 	test/filters_test.sh
 
 .PHONY: test
-test: validate test-filters test-ws test-ban test-tcp test-http test-guard test-guard-sidecar ## run the full suite
+test: validate test-filters test-ws test-ban test-tcp test-http test-multiprofile test-guard test-guard-sidecar ## run the full suite
 
 .PHONY: install
 install: ## host mode: render configs, install detection + guard (needs root)
@@ -76,15 +109,30 @@ install: ## host mode: render configs, install detection + guard (needs root)
 # Build as your normal user, install as root.
 .PHONY: install-guard
 install-guard: ## install the eBPF guard and its systemd unit (run `make guard` first, needs root)
-	@test -x guard/target/release/fips-guard || { \
-	    echo "guard/target/release/fips-guard not built."; \
+	@bin="$(GUARD_BIN)"; \
+	[ -x "$$bin" ] || bin="$(GUARD_BIN_NATIVE)"; \
+	test -x "$$bin" || { \
+	    echo "no built guard binary found (looked in $(GUARD_BIN)"; \
+	    echo "and $(GUARD_BIN_NATIVE))."; \
 	    echo "Run 'make guard' as your normal user first (needs clang);"; \
 	    echo "see guard/README.md for hosts without clang."; \
 	    exit 1; \
-	}
-	install -m 755 guard/target/release/fips-guard $(PREFIX)/bin/fips-guard
+	}; \
+	if ! file -b "$$bin" | grep -q static; then \
+	    echo "WARNING: $$bin is dynamically linked."; \
+	    echo "  It will run on this host, but the container-mode detection"; \
+	    echo "  sidecar bind-mounts this same file and its glibc is older,"; \
+	    echo "  so it will fail there with a GLIBC_x.yz loader error."; \
+	    echo "  Build a portable one with: make guard"; \
+	fi; \
+	install -m 755 "$$bin" $(PREFIX)/bin/fips-guard
 	install -m 755 guard/shield-ban $(PREFIX)/bin/shield-ban
 	install -d $(PREFIX)/lib/fips-shield
 	install -m 755 core/actions/shield-ban $(PREFIX)/lib/fips-shield/shield-ban-file
 	install -m 644 deploy/host/fips-guard.service /etc/systemd/system/
+	install -m 644 deploy/host/fips-guard-watchdog.service /etc/systemd/system/
+	install -m 644 deploy/host/fips-guard-watchdog.timer /etc/systemd/system/
 	@echo "now: systemctl daemon-reload && systemctl enable --now fips-guard"
+	@echo "     systemctl enable --now fips-guard-watchdog.timer"
+	@echo "     (the timer re-attaches the classifier if it goes missing;"
+	@echo "      without it, a detached filter is never noticed)"
