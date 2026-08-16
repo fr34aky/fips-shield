@@ -50,6 +50,15 @@ SHIELD_TCP_CONN_RATE=7
 EOF
 printf 'fd97:aaaa::1 %s\nfd97:bbbb::2 0\n' "$(( $(date +%s) + 3600 ))" \
     > "$WORK_DIR/banlist"
+# A second copy in its own directory for the container case. mktemp -d
+# makes WORK_DIR 0700, and the container runs with --cap-drop ALL, so
+# root inside has no CAP_DAC_OVERRIDE and cannot traverse it — the same
+# mechanism that stops the host unit reading a shield.env under a 0750
+# home directory. Real docker volumes are 0755, so this mirrors
+# production rather than working around it.
+mkdir -p "$WORK_DIR/bans" && chmod 755 "$WORK_DIR/bans" "$WORK_DIR/logs"
+cp "$WORK_DIR/banlist" "$WORK_DIR/bans/banlist"
+chmod 644 "$WORK_DIR/bans/banlist"
 # A log line carrying a quote and a backslash, which is what an attacker
 # controls via User-Agent. It must come back as one JSON string.
 cat > "$WORK_DIR/logs/shield-ssh.stream.log" <<'EOF'
@@ -230,5 +239,49 @@ case "$refusal" in
     *) fail "the refusal should say what to do instead" ;;
 esac
 echo "  ok   a routable bind is refused unless explicitly overridden"
+
+echo "=== container mode: the overlay serves volume-mounted data ==="
+
+# Host mode and container mode read different paths: in container mode
+# the logs and banlist are docker volumes, not /var/log/nginx and
+# /var/lib/fips-shield. A host install against a container deployment
+# resolves config fine and then shows nothing, which is what shipped
+# first. This asserts the overlay image reads what the stack writes.
+if command -v docker >/dev/null 2>&1; then
+    docker build -q -f "$REPO_ROOT/deploy/container/Dockerfile.ui" \
+        -t fips-shield-ui:test "$REPO_ROOT" >/dev/null
+    docker rm -f fips-shield-ui-test >/dev/null 2>&1 || true
+    docker run -d --name fips-shield-ui-test -p 127.0.0.1:18101:8088 \
+        -e SHIELD_UI_INSECURE_BIND=true \
+        -v "$WORK_DIR/logs":/var/log/nginx:ro \
+        -v "$WORK_DIR/bans":/var/lib/fips-shield:ro \
+        -v "$WORK_DIR/shield.env":/etc/fips-shield/shield.env:ro \
+        --read-only --tmpfs /tmp --cap-drop ALL \
+        --security-opt no-new-privileges:true \
+        fips-shield-ui:test >/dev/null
+    for _ in $(seq 1 40); do
+        curl -sf http://127.0.0.1:18101/api/status >/dev/null 2>&1 && break
+        sleep 0.25
+    done
+    CSTATUS=$(curl -s http://127.0.0.1:18101/api/status)
+    docker rm -f fips-shield-ui-test >/dev/null 2>&1 || true
+
+    python3 - "$CSTATUS" <<'CONT' || exit 1
+import json, sys
+d = json.loads(sys.argv[1])
+# read_only:true plus a tmpfs — shield-config resolves through a
+# temporary file and would fail with "mktemp: Read-only file system"
+# without the tmpfs.
+assert d["config_ok"] is True, d.get("config_error")
+assert [s["name"] for s in d["services"]] == ["strfry", "ssh"], d["services"]
+# The image needs bash for core/actions/shield-ban, which is
+# #!/usr/bin/env bash; alpine has none by default.
+assert d["bans_ok"] is True, d.get("bans_error")
+assert d["ban_count"] == 2, d
+print("  ok   the container image resolves config and reads the volumes")
+CONT
+else
+    echo "  SKIP docker not available"
+fi
 
 echo OK

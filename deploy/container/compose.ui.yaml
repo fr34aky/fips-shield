@@ -1,0 +1,59 @@
+# Overlay adding the read-only status dashboard to the container stack.
+#
+#   docker compose -f compose.yaml -f compose.ui.yaml up -d --build
+#
+# Then, from your workstation:
+#   ssh -N -L 8088:127.0.0.1:8088 <node>      # open localhost:8088
+#
+# Why this exists rather than `make install-ui` on the host: in
+# container mode the logs and the banlist are Docker named volumes, not
+# /var/log/nginx and /var/lib/fips-shield. A host-installed dashboard
+# would resolve configuration correctly and then find no logs and no
+# bans, because it would be looking at paths nothing writes to. Running
+# it here is the same pattern the fail2ban sidecar uses: mount the
+# shared volumes, read what the shield actually wrote.
+#
+# Remove the "-f compose.ui.yaml" to drop the dashboard. Nothing else
+# changes; it only reads.
+
+services:
+  shield-ui:
+    build:
+      context: ../..
+      dockerfile: deploy/container/Dockerfile.ui
+    # Published on the host's loopback only. This is the whole security
+    # posture of the dashboard: it has no authentication, and it serves
+    # which node identities are banned plus the contents of the access
+    # logs. Changing this to "8088:8088" publishes it on every interface
+    # including fips0, which hands a mesh peer the shield's own view of
+    # itself. Tunnel with ssh instead.
+    ports:
+      - "127.0.0.1:8088:8088"
+    # Not host networking, unlike the shield: this needs no mesh
+    # address, and the bridge is what lets the port above be scoped to
+    # loopback.
+    environment:
+      # Binding 0.0.0.0 inside the container is safe *because* of the
+      # loopback-scoped publish above; the flag exists to stop a host
+      # binding a routable address, which is a different situation.
+      SHIELD_UI_INSECURE_BIND: "true"
+    volumes:
+      # The same volumes the shield and fail2ban write, read-only. This
+      # is what makes the Logs and Bans panels show real data.
+      - shield-logs:/var/log/nginx:ro
+      - shield-bans:/var/lib/fips-shield:ro
+      # The config, so the dashboard resolves presets from the same file
+      # the stack runs on rather than a copy that can drift.
+      - ./shield.env:/etc/fips-shield/shield.env:ro
+    # It reads. That is all it does.
+    read_only: true
+    # shield-config resolves through a temporary file, so it needs one
+    # writable directory. A tmpfs rather than relaxing read_only: the
+    # filesystem stays immutable and nothing survives a restart.
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

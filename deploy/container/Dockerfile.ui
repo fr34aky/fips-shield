@@ -1,0 +1,50 @@
+# fips-shield read-only status dashboard, containerised.
+#
+# Build from the repository root:
+#   docker build -f deploy/container/Dockerfile.ui -t fips-shield-ui .
+#
+# Built here rather than bind-mounted from the host, unlike the eBPF
+# guard. The guard is bind-mounted because the host must load the
+# classifier anyway, so the binary has to exist there and version skew
+# between the map writer and the classifier would be a real bug. The
+# dashboard has neither constraint, and someone deploying with compose
+# should not have to install a Rust toolchain to see a status page.
+FROM rust:1-alpine AS build
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY ui/Cargo.toml ui/Cargo.lock* ./
+COPY ui/src ./src
+# Static by default on alpine's musl target; the runtime stage below has
+# no libc to link against at all.
+RUN cargo build --release && strip target/release/shield-ui
+
+FROM alpine:3
+# bash is for core/actions/shield-ban, which is #!/usr/bin/env bash. It
+# is a frozen-contract CLI shared with the other deploy modes, so the
+# image adapts rather than the script being rewritten to POSIX sh for
+# this one consumer. shield-config itself is POSIX sh and runs on
+# busybox.
+RUN apk add --no-cache bash
+COPY bin/shield-config /usr/local/bin/shield-config
+COPY presets/ /etc/fips-shield/presets/
+# The file backend. In container mode the banlist lives in a shared
+# volume, so this reads exactly what the shield and fail2ban see. The
+# eBPF wrapper is deliberately NOT used here: it would need CAP_BPF,
+# which is host-wide, and a status page is not worth that.
+COPY core/actions/shield-ban /usr/local/bin/shield-ban
+COPY --from=build /src/target/release/shield-ui /usr/local/bin/shield-ui
+RUN chmod +x /usr/local/bin/shield-config /usr/local/bin/shield-ban \
+    /usr/local/bin/shield-ui
+
+ENV SHIELD_PRESET_DIR=/etc/fips-shield/presets
+ENV SHIELD_UI_ENV_FILE=/etc/fips-shield/shield.env
+
+# Binds 0.0.0.0 INSIDE the container, which is why compose passes
+# --insecure-bind. That is not the same trade the flag guards against on
+# a host: this container's port is published only on the host's
+# 127.0.0.1, so the page is still unreachable from the mesh. Publishing
+# it anywhere else re-opens exactly the exposure the flag exists to stop.
+ENV SHIELD_UI_BIND=0.0.0.0:8088
+EXPOSE 8088
+
+ENTRYPOINT ["/usr/local/bin/shield-ui"]

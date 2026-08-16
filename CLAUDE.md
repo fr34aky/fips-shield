@@ -92,6 +92,16 @@ authenticated privileged helper instead.
 - Log lookups are whitelisted against the configured service names
   because the name is interpolated into a filename.
 - Built static from the same musl target as the guard.
+- **Two deploy modes, and the choice is forced.** In container mode the
+  logs and banlist are docker named volumes, not `/var/log/nginx` and
+  `/var/lib/fips-shield` — so a host install against a container stack
+  resolves config correctly and then shows nothing. Container mode uses
+  `deploy/container/compose.ui.yaml` (image builds shield-ui itself, no
+  host toolchain); host mode uses `make install-ui`.
+- Host mode: the unit has an empty `CapabilityBoundingSet`, so root has
+  no `CAP_DAC_READ_SEARCH` and cannot traverse a 0750 home directory.
+  `shield.env` must live somewhere root-readable (`/etc/fips-shield/`).
+  `install-ui` checks and warns.
 
 ### Frozen contracts (the plugin seams)
 

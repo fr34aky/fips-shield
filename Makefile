@@ -114,13 +114,31 @@ install-ui: ## install the dashboard and its systemd unit (needs root)
 	@# Point the service at the env file this install used. Without it the
 	@# service starts in / and shield-config finds no shield.env.
 	@env_abs="$$(cd "$$(dirname '$(ENV)')" 2>/dev/null && pwd)/$$(basename '$(ENV)')"; \
-	if [ -f "$$env_abs" ]; then \
+	if [ ! -f "$$env_abs" ]; then \
+	    echo "note: $(ENV) not found. Set SHIELD_UI_ENV_FILE in"; \
+	    echo "      /etc/default/shield-ui, or the dashboard will find no config."; \
+	elif ! timeout 5 su -s /bin/sh -c "test -r '$$env_abs'" nobody 2>/dev/null; then \
+	    echo; \
+	    echo "WARNING: $$env_abs is not readable by an unprivileged user."; \
+	    echo "  The unit runs as root with an empty CapabilityBoundingSet, so it has"; \
+	    echo "  no CAP_DAC_READ_SEARCH and cannot traverse a 0750 home directory."; \
+	    echo "  The dashboard would start cleanly and report 'no such env file'."; \
+	    echo; \
+	    echo "  Move it somewhere root-readable and point the stack at it:"; \
+	    echo "      sudo install -d /etc/fips-shield"; \
+	    echo "      sudo cp $$env_abs /etc/fips-shield/shield.env"; \
+	    echo "      sudo make install-ui ENV=/etc/fips-shield/shield.env"; \
+	    echo; \
+	    echo "  In container mode do NOT use host mode for the dashboard at all —"; \
+	    echo "  the logs and banlist are docker volumes, not host paths. Use:"; \
+	    echo "      docker compose -f compose.yaml -f compose.ui.yaml up -d --build"; \
+	    echo; \
+	    install -d /etc/default; \
+	    printf 'SHIELD_UI_ENV_FILE=%s\n' "$$env_abs" > /etc/default/shield-ui; \
+	else \
 	    install -d /etc/default; \
 	    printf 'SHIELD_UI_ENV_FILE=%s\n' "$$env_abs" > /etc/default/shield-ui; \
 	    echo "config: shield-ui will read $$env_abs"; \
-	else \
-	    echo "note: $(ENV) not found. Set SHIELD_UI_ENV_FILE in"; \
-	    echo "      /etc/default/shield-ui, or the dashboard will find no config."; \
 	fi
 	@# shield-ban is installed by `make install` or `make install-guard`,
 	@# not here — say so rather than let the Bans panel fail unexplained.

@@ -10,23 +10,50 @@ in it. That is a deliberate boundary, not a missing feature — see
 
 ## Running it
 
+**Which one you use is decided by how the shield itself runs**, not by
+preference. In container mode the logs and the banlist are Docker named
+volumes, not `/var/log/nginx` and `/var/lib/fips-shield`, so a
+host-installed dashboard resolves configuration correctly and then finds
+no logs and no bans — it is looking at paths nothing writes to.
+
+### Container mode
+
+```sh
+cd deploy/container
+docker compose -f compose.yaml -f compose.ui.yaml up -d --build
+```
+
+That is all. The image builds `shield-ui` itself, so the host needs no
+Rust toolchain, and it mounts the same `shield-logs` and `shield-bans`
+volumes the shield and fail2ban use, read-only, plus your `shield.env`.
+
+The port is published on `127.0.0.1:8088` only. Publishing it as
+`8088:8088` instead would expose it on every interface including
+`fips0`, which hands a mesh peer the shield's own view of itself.
+
+### Host mode
+
 ```sh
 rustup target add "$(uname -m)"-unknown-linux-musl   # once, same target as the guard
 make ui                       # as your normal user
-sudo make install-ui ENV=shield.env
+sudo make install-ui ENV=/etc/fips-shield/shield.env
 sudo systemctl daemon-reload && sudo systemctl enable --now shield-ui
 ```
 
-Pass `ENV=` the shield.env you actually use — in container mode that is
-`deploy/container/shield.env`. `install-ui` records it in
-`/etc/default/shield-ui`, because the service starts in `/` and would
-otherwise find no configuration.
+`install-ui` records the env path in `/etc/default/shield-ui`, because
+the service starts in `/` and would otherwise find no configuration. It
+also installs `shield-config` and `presets/`, which the dashboard runs
+to resolve configuration. It does **not** install `shield-ban`; that
+comes from `sudo make install` or `sudo make install-guard`. Without it
+the Bans panel says so.
 
-`install-ui` also installs `shield-config` and `presets/`, which the
-dashboard runs to resolve configuration. It does **not** install
-`shield-ban`; that comes from `sudo make install` (host mode) or
-`sudo make install-guard` (eBPF backend). Without it the Bans panel
-says so.
+**Keep `shield.env` outside a home directory.** The unit runs as root
+with an empty `CapabilityBoundingSet`, so it has no
+`CAP_DAC_READ_SEARCH` and cannot traverse a `0750` home directory —
+Ubuntu's default. A `shield.env` in `~/fips-shield/` is unreadable, and
+the dashboard starts cleanly and reports `no such env file` on every
+panel. `install-ui` checks for this and warns. `/etc/fips-shield/` is
+the right home for it.
 
 Then, from your workstation:
 
@@ -68,12 +95,18 @@ because the causes need different fixes:
 | Message | Cause | Fix |
 |---|---|---|
 | `No such file or directory` | the tool is not installed on this host | `sudo make install`, `sudo make install-guard`, or point the matching `--shield-*` flag at it |
-| `no shield.env found` | installed, but started in `/` with nothing to read | set `SHIELD_UI_ENV_FILE` in `/etc/default/shield-ui` |
+| `no such env file: /home/...` | the path exists but the service cannot traverse a `0750` home directory | move `shield.env` to `/etc/fips-shield/`, or use container mode |
+| `no shield.env found` | started in `/` with nothing to read | set `SHIELD_UI_ENV_FILE` in `/etc/default/shield-ui` |
 | a permission error from `fips-guard` | the unit has no `CAP_BPF`, so the pinned maps cannot be opened | see below |
+| everything resolves, but Logs and Bans are empty | host mode against a container deployment | use the compose overlay instead |
 
-In container mode the shield's own tools live inside the images, so the
-host needs its own copy of `shield-config` and `presets/` — which is
-what `install-ui` now installs.
+To reproduce what the service sees, drop the capabilities the way the
+unit does:
+
+```sh
+sudo setpriv --bounding-set=-all --inh-caps=-all cat /path/to/shield.env >/dev/null \
+    && echo readable || echo blocked
+```
 
 ### The eBPF panels and CAP_BPF
 
