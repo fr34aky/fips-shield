@@ -26,15 +26,23 @@ chmod 777 "$WORK_DIR/logs" "$WORK_DIR/bans"
 
 # Test policy: tight enough to trip deterministically. Only /allowed/*
 # is exposed, and DELETE is not in the method list.
-sed -e 's/^SHIELD_PROFILES=.*/SHIELD_PROFILES=http/' \
-    -e 's/^SHIELD_BIND_ADDR=.*/SHIELD_BIND_ADDR=::1/' \
-    -e 's/^SHIELD_HTTP_SERVICE=.*/SHIELD_HTTP_SERVICE=web/' \
-    -e 's/^SHIELD_HTTP_REQ_RATE=.*/SHIELD_HTTP_REQ_RATE=5r\/s/' \
-    -e 's/^SHIELD_HTTP_REQ_BURST=.*/SHIELD_HTTP_REQ_BURST=5/' \
-    -e 's/^SHIELD_HTTP_PATH_REGEX=.*/SHIELD_HTTP_PATH_REGEX=\/allowed\/.*/' \
-    -e 's/^SHIELD_HTTP_MAX_BODY=.*/SHIELD_HTTP_MAX_BODY=100k/' \
-    -e 's/^SHIELD_HTTP_CONN_RATE=.*/SHIELD_HTTP_CONN_RATE=0/' \
-    "$REPO_ROOT"/shield.env.example > "$WORK_DIR/shield.env"
+# Test policy is appended rather than sed-substituted into the example:
+# the example no longer carries every key (presets supply the rest), so a
+# sed that matched nothing would silently leave the preset value in place
+# and the test would pass against a policy it never set. Appending is
+# also exactly how an operator pins a value, so this exercises the
+# override path.
+cp "$REPO_ROOT"/shield.env.example "$WORK_DIR/shield.env"
+cat >> "$WORK_DIR/shield.env" <<'EOF'
+SHIELD_PROFILES=http
+SHIELD_BIND_ADDR=::1
+SHIELD_HTTP_SERVICE=web
+SHIELD_HTTP_REQ_RATE=5r/s
+SHIELD_HTTP_REQ_BURST=5
+SHIELD_HTTP_PATH_REGEX=/allowed/.*
+SHIELD_HTTP_MAX_BODY=100k
+SHIELD_HTTP_CONN_RATE=0
+EOF
 
 docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile \
     -t fips-shield:test "$REPO_ROOT"

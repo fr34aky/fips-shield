@@ -5,6 +5,11 @@
 # to only validate the configuration).
 set -eu
 
+# Resolve presets first: the jail template below needs every
+# SHIELD_F2B_* key, and an unset one renders an empty maxretry that
+# fail2ban silently replaces with its own default.
+eval "$(/usr/local/bin/shield-config resolve --from-env --shell)"
+
 envsubst '${SHIELD_BAN_FILE} ${SHIELD_BAN_ALSO_FILE}' \
     < /etc/fail2ban/fips-shield-action.conf.template \
     > /etc/fail2ban/action.d/fips-shield.conf

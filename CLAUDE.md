@@ -13,7 +13,10 @@ Data flow: mesh peers → `fips0` TUN → eBPF tc ingress (kernel drops/throttle
 ```sh
 make help                # list all targets
 make test                # full suite (needs Docker; guard tests need Linux + privileges)
-make validate            # static: render every profile, nginx -t, fail2ban -t (test/validate.sh)
+make validate            # static: render every profile and preset level, nginx -t, fail2ban -t
+make show                # effective config + provenance (SERVICE=http to narrow)
+make diff                # only the values overridden in shield.env
+make levels              # what strict/default/loose mean
 make test-filters        # fail2ban filters match real log lines
 make test-ws             # WebSocket message policy (strfry profile)
 make test-ban            # detection -> enforcement loop
@@ -33,6 +36,30 @@ Each `test-*` target is one script in `test/` — run the script directly to run
 - The guard is built static (`rustup target add "$(uname -m)"-unknown-linux-musl`) because the same binary is bind-mounted into the debian:12 fail2ban sidecar. glibc is backward compatible but never forward, so a glibc build made on a newer host cannot exec there at all. Keep it static.
 
 ## Architecture
+
+### Configuration: presets + overrides
+
+`shield.env` is deliberately incomplete. `bin/shield-config` resolves it
+against `presets/<scope>/<level>.env` (scope = `core` plus each profile
+in `SHIELD_PROFILES`; level from `SHIELD_PRESET`, or
+`SHIELD_<PROFILE>_PRESET` per service). Two layers only, and an
+explicitly-set key always wins — so a pre-presets `shield.env` that sets
+everything still behaves identically.
+
+- `shield-config` is POSIX sh because **both** deploy modes run it:
+  `deploy/host/render.sh` and the two container entrypoints (busybox
+  ash). One implementation is what keeps the modes in agreement.
+- It parses `KEY=VALUE` literally, and a repeated key takes its **last**
+  occurrence — matching `docker --env-file`. Appending an override to
+  the bottom of `shield.env` is the supported way to pin a value, and
+  the smoke tests rely on it.
+- A new profile MUST ship `presets/<name>/{strict,default,loose}.env`
+  covering every key its templates reference; there is nowhere else for
+  those defaults to live now.
+- Never consume the resolver's `KEY<TAB>VALUE<TAB>SOURCE` stream with
+  `IFS=<tab> read -r k v src`. Tab is IFS whitespace, so an empty value
+  collapses and the source label lands in the config. Split with
+  parameter expansion. `test/validate.sh` asserts this.
 
 ### Core vs. profiles
 

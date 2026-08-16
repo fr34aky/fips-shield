@@ -4,9 +4,10 @@ One page, from nothing to a protected service. If you want to
 understand *why* any of it works, read the [user guide](guide.md) —
 this page is only the shortest path that works.
 
-`shield.env.example` is long because every knob is documented in it.
-**Almost all of them have working defaults.** In the common case you
-edit one to three lines and never look at the rest.
+`shield.env` is short: you set the few things specific to your node and
+a **preset** supplies the rest. Three enforcement levels ship —
+`strict`, `default`, `loose` — and you can override any individual value
+without giving up the preset for everything else.
 
 ---
 
@@ -25,13 +26,12 @@ the fips daemon is not running and nothing below will work.
 cp shield.env.example shield.env
 ```
 
-Now edit **only** the lines for your case, below. `SHIELD_BIND_ADDR` is
-the one edit every deployment needs.
+Then edit the lines for your case. `SHIELD_BIND_ADDR` is the one edit
+every deployment needs.
 
 ### A Nostr relay (strfry)
 
-`SHIELD_PROFILES=strfry` and `SHIELD_UPSTREAM=127.0.0.1:7777` are
-already the defaults, so this is a one-line change:
+`SHIELD_PROFILES=strfry` is already the default, so this is one line:
 
 ```sh
 SHIELD_BIND_ADDR=fd97:...
@@ -52,7 +52,6 @@ relay {
 SHIELD_PROFILES=http
 SHIELD_BIND_ADDR=fd97:...
 SHIELD_HTTP_UPSTREAM=127.0.0.1:3000    # your app
-SHIELD_HTTP_LISTEN_PORT=8080           # default; change if you like
 ```
 
 ### A plain TCP service (SSH, a database, …)
@@ -61,33 +60,78 @@ SHIELD_HTTP_LISTEN_PORT=8080           # default; change if you like
 SHIELD_PROFILES=tcp
 SHIELD_BIND_ADDR=fd97:...
 SHIELD_TCP_UPSTREAM=127.0.0.1:22       # default: SSH
-SHIELD_TCP_LISTEN_PORT=2222            # default
 ```
 
 ### Two or more at once
 
-List them. The default ports do not collide (strfry 80, http 8080,
-tcp 2222), so this stays a two-line change plus each profile's
-upstream:
+List them. One profile = one service, and the default ports do not
+collide (strfry 80, http 8080, tcp 2222):
 
 ```sh
 SHIELD_PROFILES=strfry,http,tcp
 SHIELD_BIND_ADDR=fd97:...
 ```
 
-Each profile's limits are its own: `SHIELD_TCP_CONN_RATE` and
-`SHIELD_TCP_MAX_CONNS_PER_NODE` govern the tcp listener and nothing
-else, so relay traffic cannot use up the budget that would let the same
-node reach SSH. (Before 2026-08 those counters were shared and the
-tightest rate governed every profile — if you are upgrading from an
-older checkout, that is fixed, and you can undo any rates you had
-levelled to work around it.)
+Each service's limits are its own, so a busy relay cannot use up the
+budget that lets the same node reach SSH.
 
 **In every case the protected service must bind loopback only.** If it
 also listens on `fips0`, mesh peers reach it directly and the shield
 protects nothing.
 
-## 3. Start it
+## 3. Pick an enforcement level
+
+```sh
+shield-config levels
+```
+
+```
+strict   Tightest limits and fastest banning. For a node whose clients you
+         know, or one under active abuse.
+default  Balanced. What the project ships and what the smoke tests exercise.
+loose    Generous limits and slow banning. For a busy public service where a
+         false positive costs more than an abusive peer.
+```
+
+Set one for everything, and optionally a different one per service:
+
+```sh
+SHIELD_PRESET=default
+SHIELD_STRFRY_PRESET=strict     # relay tight, everything else balanced
+```
+
+Then check what that actually means before you start anything:
+
+```sh
+shield-config show strfry
+```
+
+```
+service strfry   preset strict
+
+  KEY                                VALUE            SOURCE
+  SHIELD_MAX_CONNS_PER_NODE          4                preset:strfry/strict
+  SHIELD_STRFRY_CONN_RATE            30               preset:strfry/strict
+  SHIELD_WS_MAX_LIMIT                1000             preset:strfry/strict
+  SHIELD_UPSTREAM                    127.0.0.1:7777   preset:strfry/strict
+  ...
+```
+
+To change one value, set it in `shield.env` — the rest of the preset
+still applies:
+
+```sh
+SHIELD_WS_MAX_LIMIT=5000        # clients page larger result sets
+```
+
+```
+  SHIELD_WS_MAX_LIMIT                5000             custom
+```
+
+`shield-config diff` lists only what you have overridden, which is the
+short answer to "what did I change on this node".
+
+## 4. Start it
 
 ### Container mode — easiest, nothing to install but Docker
 
@@ -134,7 +178,7 @@ The tmpfiles snippet recreates `SHIELD_SOCKET_DIR` at boot — `/run` is
 a tmpfs, and those 0700 permissions are what stop another local process
 from spoofing a client address past the shield.
 
-## 4. Open the port on the mesh firewall
+## 5. Open the port on the mesh firewall
 
 Only if the node runs the FIPS firewall baseline (default-deny on
 fips0). Open the **shield's** port, never the protected service's:
@@ -149,7 +193,7 @@ sudo systemctl reload-or-restart fips-firewall.service
 Use the port you configured: 80 for strfry, 8080 for http, 2222 for
 tcp — one `accept` line each if you run several.
 
-## 5. Check it works
+## 6. Check it works
 
 From **another mesh node**:
 
@@ -236,35 +280,24 @@ Two known rough edges, both open findings:
 
 ## Upgrading an existing install
 
-Config gained seven keys. Append them to your `shield.env` (these are
-the defaults):
+Nothing to do. A `shield.env` written before presets existed sets every
+key explicitly, and an explicit value always wins, so behaviour is
+unchanged. `shield-config diff` will list every one of them as `custom`.
 
-```sh
-SHIELD_WS_MAX_HS_READS=32
-SHIELD_WS_MAX_MSG_READS=
-SHIELD_WS_MAX_LIMIT=5000
-SHIELD_WS_MAX_FILTER_VALUE=512
-SHIELD_WS_REQUIRE_NARROWING=true
-SHIELD_F2B_CONNRATE_MAXRETRY=30
-SHIELD_F2B_CONN_MAXRETRY=20
-```
-
-The five `SHIELD_WS_*` keys are only needed when the strfry profile is
-enabled, and nginx **refuses to start** without them, so you cannot miss
-those. The two `SHIELD_F2B_*` keys fail quietly — the new jails render
-an empty `maxretry` and fail2ban falls back to its own default — so
-those are the ones to remember.
-
-Re-copying `shield.env.example` and re-applying your values is the
-safest route.
+To adopt a preset, delete the lines you have no opinion about and add
+`SHIELD_PRESET=default`. `shield-config show` before and after tells you
+exactly what changed.
 
 ## The knobs worth a decision
 
-Everything else can stay at its default. These three change behaviour
-your clients will notice:
+The presets handle the rest, but these three change behaviour your
+clients will notice, so they are worth an explicit choice:
 
-| Knob | Default | Change it when |
-|---|---|---|
-| `SHIELD_WS_REQUIRE_NARROWING` | `true` | Your clients open genuinely unconstrained subscriptions (`["REQ","s",{}]`). Normal filters like `{"kinds":[1]}` are unaffected. |
-| `SHIELD_WS_MAX_LIMIT` | `5000` | Clients legitimately page larger result sets. |
-| `SHIELD_HTTP_METHODS` / `SHIELD_HTTP_MAX_BODY` | `GET HEAD POST` / `1m` | Serving uploads — Blossom and NIP-96 need `PUT`/`DELETE` and a much larger body cap. |
+| Knob | Change it when |
+|---|---|
+| `SHIELD_WS_REQUIRE_NARROWING` | Your clients open genuinely unconstrained subscriptions (`["REQ","s",{}]`). Normal filters like `{"kinds":[1]}` are unaffected. |
+| `SHIELD_WS_MAX_LIMIT` | Clients legitimately page larger result sets. |
+| `SHIELD_HTTP_METHODS` / `SHIELD_HTTP_MAX_BODY` | Serving uploads — Blossom and NIP-96 need `PUT`/`DELETE` and a much larger body cap. |
+
+Run `shield-config show` to see every value you could pin, with its
+current source.

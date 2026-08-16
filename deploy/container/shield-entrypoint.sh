@@ -5,6 +5,12 @@
 # /etc/nginx/templates/*.template into /etc/nginx/conf.d/.
 set -eu
 
+# Fill in preset values for every key the operator did not set. docker
+# --env-file has already put shield.env into the environment, so
+# "already set" means "the operator chose it" and the preset leaves it
+# alone. Same script host mode runs, so the two cannot drift.
+eval "$(/usr/local/bin/shield-config resolve --from-env --shell)"
+
 for profile in $(echo "${SHIELD_PROFILES:-strfry}" | tr ',' ' '); do
     dir="/etc/nginx/profiles/$profile"
     if [ ! -d "$dir" ]; then

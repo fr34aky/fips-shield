@@ -25,14 +25,22 @@ py() {
 mkdir -p "$WORK_DIR/logs" "$WORK_DIR/bans"
 chmod 777 "$WORK_DIR/logs" "$WORK_DIR/bans"
 
-sed -e 's/^SHIELD_PROFILES=.*/SHIELD_PROFILES=tcp/' \
-    -e 's/^SHIELD_BIND_ADDR=.*/SHIELD_BIND_ADDR=::1/' \
-    -e 's/^SHIELD_TCP_SERVICE=.*/SHIELD_TCP_SERVICE=echo/' \
-    -e 's/^SHIELD_TCP_UPSTREAM=.*/SHIELD_TCP_UPSTREAM=127.0.0.1:9001/' \
-    -e 's/^SHIELD_TCP_MAX_CONNS_PER_NODE=.*/SHIELD_TCP_MAX_CONNS_PER_NODE=2/' \
-    -e 's/^SHIELD_TCP_CONN_RATE=.*/SHIELD_TCP_CONN_RATE=5/' \
-    -e 's/^SHIELD_CONN_WINDOW=.*/SHIELD_CONN_WINDOW=5/' \
-    "$REPO_ROOT"/shield.env.example > "$WORK_DIR/shield.env"
+# Test policy is appended rather than sed-substituted into the example:
+# the example no longer carries every key (presets supply the rest), so a
+# sed that matched nothing would silently leave the preset value in place
+# and the test would pass against a policy it never set. Appending is
+# also exactly how an operator pins a value, so this exercises the
+# override path.
+cp "$REPO_ROOT"/shield.env.example "$WORK_DIR/shield.env"
+cat >> "$WORK_DIR/shield.env" <<'EOF'
+SHIELD_PROFILES=tcp
+SHIELD_BIND_ADDR=::1
+SHIELD_TCP_SERVICE=echo
+SHIELD_TCP_UPSTREAM=127.0.0.1:9001
+SHIELD_TCP_MAX_CONNS_PER_NODE=2
+SHIELD_TCP_CONN_RATE=5
+SHIELD_CONN_WINDOW=5
+EOF
 
 docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile \
     -t fips-shield:test "$REPO_ROOT"

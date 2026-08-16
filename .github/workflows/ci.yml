@@ -16,7 +16,7 @@ jobs:
         # envsubst, and the patterns that build them, must not expand.
         run: |
           shellcheck --exclude=SC2016 $(git ls-files '*.sh') \
-            core/actions/shield-ban guard/shield-ban
+            core/actions/shield-ban guard/shield-ban bin/shield-config
       - name: rustfmt
         run: cargo fmt --manifest-path guard/Cargo.toml --check
       - name: clippy

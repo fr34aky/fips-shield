@@ -24,17 +24,16 @@ ENV_FILE="${1:?usage: render.sh <shield.env> [output-dir] [njs-dir]}"
 OUT_DIR="${2:-/etc/nginx/conf.d}"
 NJS_DIR="${3:-/etc/nginx/njs}"
 
-# Read KEY=VALUE literally, exactly as docker --env-file does. Sourcing
-# the file with "." would run it through the shell, so a value like
-# GET|HEAD|POST would be parsed as a pipeline, and quotes would be
-# stripped here but taken literally by docker — the two deploy modes
-# must agree.
-while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ''|'#'*) continue ;; esac
-    case "$line" in *=*) ;; *) continue ;; esac
-    key=${line%%=*}
-    case "$key" in [A-Za-z_]*) export "$key=${line#*=}" ;; esac
-done < "$ENV_FILE"
+# Resolve presets, then export the result. shield-config reads
+# KEY=VALUE literally, exactly as docker --env-file does — sourcing the
+# file with "." would run it through the shell, so a value like
+# GET|HEAD|POST would be parsed as a pipeline and quotes would be
+# stripped here but taken literally by docker. The container entrypoint
+# calls the same script, which is what keeps the two modes in agreement.
+#
+# Anything set in the env file wins; the preset only fills the rest, so
+# a full shield.env written before presets existed behaves identically.
+eval "$("$REPO_ROOT/bin/shield-config" resolve -f "$ENV_FILE" --shell)"
 
 TEMPLATES=("$REPO_ROOT"/core/nginx/*.template)
 for profile in $(echo "${SHIELD_PROFILES:-strfry}" | tr ',' ' '); do

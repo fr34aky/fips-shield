@@ -30,20 +30,28 @@ chmod 777 "$WORK_DIR/logs" "$WORK_DIR/bans"
 # tcp deliberately much tighter than http, and a window long enough that
 # it cannot roll over mid-test and hand the tcp profile a fresh budget —
 # that would make the isolation checks pass for the wrong reason.
-sed -e 's/^SHIELD_PROFILES=.*/SHIELD_PROFILES=tcp,http/' \
-    -e 's/^SHIELD_BIND_ADDR=.*/SHIELD_BIND_ADDR=::1/' \
-    -e 's/^SHIELD_CONN_WINDOW=.*/SHIELD_CONN_WINDOW=60/' \
-    -e 's/^SHIELD_TCP_SERVICE=.*/SHIELD_TCP_SERVICE=echo/' \
-    -e 's/^SHIELD_TCP_UPSTREAM=.*/SHIELD_TCP_UPSTREAM=127.0.0.1:9001/' \
-    -e 's/^SHIELD_TCP_CONN_RATE=.*/SHIELD_TCP_CONN_RATE=5/' \
-    -e 's/^SHIELD_TCP_MAX_CONNS_PER_NODE=.*/SHIELD_TCP_MAX_CONNS_PER_NODE=2/' \
-    -e 's/^SHIELD_HTTP_SERVICE=.*/SHIELD_HTTP_SERVICE=web/' \
-    -e 's/^SHIELD_HTTP_UPSTREAM=.*/SHIELD_HTTP_UPSTREAM=127.0.0.1:3000/' \
-    -e 's/^SHIELD_HTTP_CONN_RATE=.*/SHIELD_HTTP_CONN_RATE=50/' \
-    -e 's/^SHIELD_HTTP_MAX_CONNS_PER_NODE=.*/SHIELD_HTTP_MAX_CONNS_PER_NODE=20/' \
-    -e 's/^SHIELD_HTTP_REQ_RATE=.*/SHIELD_HTTP_REQ_RATE=100r\/s/' \
-    -e 's/^SHIELD_HTTP_REQ_BURST=.*/SHIELD_HTTP_REQ_BURST=100/' \
-    "$REPO_ROOT"/shield.env.example > "$WORK_DIR/shield.env"
+# Test policy is appended rather than sed-substituted into the example:
+# the example no longer carries every key (presets supply the rest), so a
+# sed that matched nothing would silently leave the preset value in place
+# and the test would pass against a policy it never set. Appending is
+# also exactly how an operator pins a value, so this exercises the
+# override path.
+cp "$REPO_ROOT"/shield.env.example "$WORK_DIR/shield.env"
+cat >> "$WORK_DIR/shield.env" <<'EOF'
+SHIELD_PROFILES=tcp,http
+SHIELD_BIND_ADDR=::1
+SHIELD_CONN_WINDOW=60
+SHIELD_TCP_SERVICE=echo
+SHIELD_TCP_UPSTREAM=127.0.0.1:9001
+SHIELD_TCP_CONN_RATE=5
+SHIELD_TCP_MAX_CONNS_PER_NODE=2
+SHIELD_HTTP_SERVICE=web
+SHIELD_HTTP_UPSTREAM=127.0.0.1:3000
+SHIELD_HTTP_CONN_RATE=50
+SHIELD_HTTP_MAX_CONNS_PER_NODE=20
+SHIELD_HTTP_REQ_RATE=100r/s
+SHIELD_HTTP_REQ_BURST=100
+EOF
 
 docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile \
     -t fips-shield:test "$REPO_ROOT"
