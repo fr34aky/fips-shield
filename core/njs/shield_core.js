@@ -169,6 +169,21 @@ function verdict(s, service, layer, rule, detail) {
 // Fixed-window connection counter. Windows are cheap and predictable;
 // a source that opens more than `rate` connections per window is
 // refused for the remainder of it.
+//
+// The key carries the listening port, not just the source address.
+// There is one shared dict for the whole shield, so an address-only key
+// made every profile increment and test THE SAME counter while each
+// compared it against its own conn_rate — the tightest rate then
+// governed all of them. Concretely: a node using the relay normally
+// (SHIELD_STRFRY_CONN_RATE=60) would blow past SHIELD_TCP_CONN_RATE=10
+// and lock itself out of SSH on the same host, having never opened an
+// SSH connection.
+//
+// Port is the right discriminator because two servers cannot listen on
+// the same address and port, so it is unique per listener by
+// construction — the same invariant the port-keyed policy js_var relies
+// on. The service name would not do: it comes from SHIELD_*_SERVICE and
+// two profiles can be set to the same string.
 function connRateExceeded(s, cfg) {
     if (!cfg.connRate) {
         return false;
@@ -178,7 +193,7 @@ function connRateExceeded(s, cfg) {
         return false;
     }
     var window = Math.floor(Date.now() / 1000 / cfg.connWindow);
-    var n = dict.incr(s.remoteAddress + ':' + window, 1, 0);
+    var n = dict.incr(portOf(s) + ':' + s.remoteAddress + ':' + window, 1, 0);
     return n > cfg.connRate;
 }
 

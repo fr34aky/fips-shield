@@ -48,6 +48,10 @@ jobs:
         run: test/tcp_smoke.sh
       - name: generic HTTP profile
         run: test/http_smoke.sh
+      # Every other behavioral test runs one profile alone, which is the
+      # one configuration in which shared limit state cannot be seen.
+      - name: per-profile limits stay isolated
+        run: test/multiprofile_smoke.sh
 
   guard:
     # Needs a privileged container and a kernel with BPF + BTF; the

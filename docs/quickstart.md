@@ -75,13 +75,13 @@ SHIELD_PROFILES=strfry,http,tcp
 SHIELD_BIND_ADDR=fd97:...
 ```
 
-> **One caveat when combining profiles.** The per-node connection-rate
-> counter is currently shared across all of them, so the *tightest*
-> `*_CONN_RATE` effectively governs every profile. If you run strfry
-> (default 60/min) next to tcp (default 10/min), normal relay traffic
-> can lock the same node out of SSH. Until that is fixed, set the rates
-> to similar values. See
-> [review-2026-08.md](review-2026-08.md#findings-medium).
+Each profile's limits are its own: `SHIELD_TCP_CONN_RATE` and
+`SHIELD_TCP_MAX_CONNS_PER_NODE` govern the tcp listener and nothing
+else, so relay traffic cannot use up the budget that would let the same
+node reach SSH. (Before 2026-08 those counters were shared and the
+tightest rate governed every profile — if you are upgrading from an
+older checkout, that is fixed, and you can undo any rates you had
+levelled to work around it.)
 
 **In every case the protected service must bind loopback only.** If it
 also listens on `fips0`, mesh peers reach it directly and the shield

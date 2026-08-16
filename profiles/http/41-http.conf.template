@@ -15,6 +15,13 @@
 # independent of any other profile's.
 limit_req_zone $binary_remote_addr zone=shield_http_req:${SHIELD_CONN_ZONE_SIZE} rate=${SHIELD_HTTP_REQ_RATE};
 
+# Per-node concurrency, on the same principle. This replaced the
+# core-wide `shield_conn` zone, which counted a node's relay
+# connections against this cap and vice versa — nginx counts per
+# (zone, key), so sharing a zone shares the count regardless of the
+# limit each server passes to limit_conn.
+limit_conn_zone $binary_remote_addr zone=shield_http_conn:${SHIELD_CONN_ZONE_SIZE};
+
 # Path allowlist, matched against the normalised, decoded URI (so
 # ../ and %2e traversal cannot slip past it). The default of .* allows
 # everything; narrow it to expose only the routes you mean to.
@@ -49,7 +56,7 @@ server {
     # denial below.
     keepalive_requests ${SHIELD_HTTP_KEEPALIVE_REQUESTS};
 
-    limit_conn shield_conn ${SHIELD_HTTP_MAX_CONNS_PER_NODE};
+    limit_conn shield_http_conn ${SHIELD_HTTP_MAX_CONNS_PER_NODE};
 
     location / {
         limit_req zone=shield_http_req burst=${SHIELD_HTTP_REQ_BURST} nodelay;

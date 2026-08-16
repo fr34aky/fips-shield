@@ -34,8 +34,15 @@ map $http_upgrade $shield_connection_upgrade {
 # no NAT aliasing, no spoofing (frames arrive authenticated via fips0).
 # Per-address limits are therefore per-node limits, and a ban is a
 # node-identity ban.
+#
+# shield_handshake is used by the strfry profile alone. A SECOND
+# consumer must declare its own zone rather than join this one: nginx
+# counts per (zone, key), so two profiles sharing a zone share the
+# count, and the tightest limit silently governs both. That is what the
+# core-wide `shield_conn` zone did until it was removed from here —
+# every profile now declares its own next to the server that uses it
+# (see docs/writing-a-profile.md).
 limit_req_zone  $binary_remote_addr zone=shield_handshake:${SHIELD_HANDSHAKE_ZONE_SIZE} rate=${SHIELD_HANDSHAKE_RATE};
-limit_conn_zone $binary_remote_addr zone=shield_conn:${SHIELD_CONN_ZONE_SIZE};
 
 # 429 tells well-behaved clients to back off; the log line tells the
 # detection engine someone didn't.

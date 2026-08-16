@@ -6,8 +6,15 @@
 # (10-strfry.conf) listens on loopback behind this and receives the
 # real client address via the PROXY protocol.
 #
-# Shared plumbing (js_import, log format, zones) is in
-# core/nginx/05-shield-core.stream.
+# Shared plumbing (js_import, log format) is in
+# core/nginx/05-shield-core.stream. Limit zones are NOT shared — see
+# below.
+
+# This profile's own concurrency zone. Never share one with another
+# profile: nginx counts per (zone, key), so a shared zone made a node's
+# open relay WebSockets count against the tcp profile's much smaller
+# cap and refuse SSH it had never connected to.
+limit_conn_zone $binary_remote_addr zone=shield_strfry_stream_conn:${SHIELD_CONN_ZONE_SIZE};
 
 server {
     listen [${SHIELD_BIND_ADDR}]:${SHIELD_LISTEN_PORT};
@@ -31,7 +38,7 @@ server {
     # once the handshake completes — which is exactly the phase an
     # inspection-cost attack never leaves. Without this, the only brake
     # on held-open connections was SHIELD_STRFRY_CONN_RATE.
-    limit_conn shield_stream_conn ${SHIELD_MAX_CONNS_PER_NODE};
+    limit_conn shield_strfry_stream_conn ${SHIELD_MAX_CONNS_PER_NODE};
 
     proxy_pass unix:${SHIELD_SOCKET_DIR}/strfry.sock;
     proxy_protocol on;
