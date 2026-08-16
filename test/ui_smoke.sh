@@ -26,9 +26,16 @@ trap cleanup EXIT
 
 fail() { echo "FAIL $*" >&2; exit 1; }
 
-BIN="$REPO_ROOT/ui/target/$(uname -m)-unknown-linux-musl/release/shield-ui"
-[ -x "$BIN" ] || BIN="$REPO_ROOT/ui/target/release/shield-ui"
-if [ ! -x "$BIN" ]; then
+# Always build, never just pick up whatever is lying in target/. An
+# earlier version of this preferred an existing musl artifact and so
+# tested a binary from before the change under test — cargo makes an
+# up-to-date build a no-op, so there is nothing to save by skipping it.
+TARGET="$(uname -m)-unknown-linux-musl"
+if rustup target list --installed 2>/dev/null | grep -qx "$TARGET"; then
+    cargo build --release --target "$TARGET" \
+        --manifest-path "$REPO_ROOT/ui/Cargo.toml" >/dev/null
+    BIN="$REPO_ROOT/ui/target/$TARGET/release/shield-ui"
+else
     cargo build --release --manifest-path "$REPO_ROOT/ui/Cargo.toml" >/dev/null
     BIN="$REPO_ROOT/ui/target/release/shield-ui"
 fi
@@ -163,6 +170,47 @@ n=$(get "/api/logs?service=ssh&kind=stream&n=999999999" |
     python3 -c 'import json,sys; print(len(json.load(sys.stdin)["lines"]))')
 [ "$n" -le 1000 ] || fail "n was not clamped: got $n lines"
 echo "  ok   an absurd line count is clamped"
+
+echo "=== says why a tool did not run ==="
+
+# The regression this guards: every panel reported a bare "could not be
+# run", which reads the same whether the tool is missing, present but
+# found no shield.env, or present but denied permission to open the
+# pinned maps. Those need three different fixes, so the message and the
+# path have to reach the page.
+BADPORT=18097
+"$BIN" --bind "127.0.0.1:$BADPORT" \
+    --env-file "$WORK_DIR/shield.env" \
+    --log-dir "$WORK_DIR/logs" \
+    --shield-config /nonexistent/shield-config \
+    --shield-ban /nonexistent/shield-ban \
+    --fips-guard /nonexistent/fips-guard >/dev/null 2>&1 &
+BAD_PID=$!
+for _ in $(seq 1 40); do
+    curl -sf "http://127.0.0.1:$BADPORT/api/status" >/dev/null 2>&1 && break
+    sleep 0.25
+done
+BAD=$(curl -s "http://127.0.0.1:$BADPORT/api/status")
+kill "$BAD_PID" 2>/dev/null
+
+python3 - "$BAD" <<'DIAG' || exit 1
+import json, sys
+d = json.loads(sys.argv[1])
+for panel in ("config", "bans", "guard"):
+    err = d.get(f"{panel}_error", "")
+    hint = d.get(f"{panel}_hint", "")
+    assert err, f"{panel} reported no error at all"
+    # The path it actually tried, so the reader can check it.
+    assert "/nonexistent/" in err, f"{panel} error does not name the path: {err}"
+    # The underlying cause, not a paraphrase.
+    assert "No such file" in err or "not found" in err.lower(), err
+    # And what to do about it.
+    assert hint, f"{panel} gave no hint"
+    assert "/nonexistent/" in hint, f"{panel} hint does not name the path: {hint}"
+# A guard that is simply not installed must not be dressed up as a fault.
+assert d.get("guard_installed") is False, d.get("guard_installed")
+print("  ok   a missing tool reports its path, its error, and the fix")
+DIAG
 
 echo "=== will not expose itself by accident ==="
 

@@ -11,17 +11,34 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run a command and return stdout, or None if it is missing or fails.
+/// Run a command and return stdout, or a reason it did not work.
 ///
-/// A missing tool is an ordinary state, not an error: the eBPF guard is
-/// optional, and fail2ban may not be installed on the same host as the
-/// dashboard. Callers render "unavailable" rather than failing.
-fn run(bin: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(bin).args(args).output().ok()?;
+/// The reason matters. A missing tool is an ordinary state here — the
+/// eBPF guard is optional, and on a container deployment the host may
+/// have no shield-config at all — but "unavailable" on its own sends
+/// the reader hunting. The three causes need three different fixes:
+///
+///   not installed        -> install it, or point --shield-config at it
+///   installed, exits 1   -> its own stderr says why (no shield.env,
+///                           no permission to open the pinned maps)
+///   installed, no perms  -> the unit is too locked down for this tool
+///
+/// So the message is carried to the page rather than collapsed into a
+/// boolean.
+fn run(bin: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{bin}: {e}"))?;
     if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if first.is_empty() {
+        Err(format!("{bin} exited {}", out.status))
     } else {
-        None
+        Err(format!("{bin}: {first}"))
     }
 }
 
@@ -31,8 +48,10 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(shield_config: &Path, env_file: Option<&Path>) -> Option<Config> {
-        let bin = shield_config.to_str()?;
+    pub fn load(shield_config: &Path, env_file: Option<&Path>) -> Result<Config, String> {
+        let bin = shield_config
+            .to_str()
+            .ok_or_else(|| "shield-config path is not valid UTF-8".to_string())?;
         let out = match env_file.and_then(|p| p.to_str()) {
             Some(f) => run(bin, &["show", "--porcelain", "-f", f]),
             None => run(bin, &["show", "--porcelain"]),
@@ -50,7 +69,7 @@ impl Config {
                 ))
             })
             .collect();
-        Some(Config { entries })
+        Ok(Config { entries })
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -181,35 +200,39 @@ pub struct Ban {
     pub until: u64,
 }
 
-pub fn bans(shield_ban: &Path) -> Option<Vec<Ban>> {
-    let out = run(shield_ban.to_str()?, &["list"])?;
-    Some(
-        out.lines()
-            .filter_map(|l| {
-                let mut f = l.split_whitespace();
-                let addr = f.next()?.to_string();
-                let until = f.next()?.parse().ok()?;
-                Some(Ban { addr, until })
-            })
-            .collect(),
-    )
+pub fn bans(shield_ban: &Path) -> Result<Vec<Ban>, String> {
+    let bin = shield_ban
+        .to_str()
+        .ok_or_else(|| "shield-ban path is not valid UTF-8".to_string())?;
+    let out = run(bin, &["list"])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let addr = f.next()?.to_string();
+            let until = f.next()?.parse().ok()?;
+            Some(Ban { addr, until })
+        })
+        .collect())
 }
 
-pub fn guard_stats(fips_guard: &Path) -> Option<Vec<(String, String)>> {
-    let out = run(fips_guard.to_str()?, &["stats"])?;
-    Some(
-        out.lines()
-            .filter_map(|l| {
-                let l = l.trim_end();
-                // "label            value" — the label may contain
-                // spaces, so split on the run of spaces before the
-                // value rather than on the first space.
-                let idx = l.find("  ")?;
-                let (label, value) = l.split_at(idx);
-                Some((label.trim().to_string(), value.trim().to_string()))
-            })
-            .collect(),
-    )
+pub fn guard_stats(fips_guard: &Path) -> Result<Vec<(String, String)>, String> {
+    let bin = fips_guard
+        .to_str()
+        .ok_or_else(|| "fips-guard path is not valid UTF-8".to_string())?;
+    let out = run(bin, &["stats"])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_end();
+            // "label            value" — the label may contain
+            // spaces, so split on the run of spaces before the
+            // value rather than on the first space.
+            let idx = l.find("  ")?;
+            let (label, value) = l.split_at(idx);
+            Some((label.trim().to_string(), value.trim().to_string()))
+        })
+        .collect())
 }
 
 /// Read the last `n` lines of a file without loading all of it.

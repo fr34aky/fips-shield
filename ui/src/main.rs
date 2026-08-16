@@ -81,7 +81,7 @@ struct State {
 }
 
 impl State {
-    fn config(&self) -> Option<collect::Config> {
+    fn config(&self) -> Result<collect::Config, String> {
         collect::Config::load(&self.args.shield_config, self.args.env_file.as_deref())
     }
 
@@ -102,6 +102,34 @@ impl State {
             })
             .unwrap_or_default()
     }
+
+    /// Where the reader should look when a tool did not run. Resolved
+    /// from the actual flags, so it names the path in force rather than
+    /// the default.
+    fn hint(&self, what: &str) -> String {
+        match what {
+            "config" => format!(
+                "shield-ui runs `{} show --porcelain`. Install it with `sudo make install` \
+                 (host mode), or point --shield-config at it. In container mode it lives \
+                 inside the image, so the host needs its own copy plus presets/. If it is \
+                 installed, it may simply not have found a shield.env — pass --env-file.",
+                self.args.shield_config.display()
+            ),
+            "bans" => format!(
+                "shield-ui runs `{} list`. Install it with `sudo make install` or \
+                 `sudo make install-guard`. With the eBPF backend it execs fips-guard, \
+                 which needs CAP_BPF to open the pinned maps — a unit with an empty \
+                 CapabilityBoundingSet cannot, even as root.",
+                self.args.shield_ban.display()
+            ),
+            _ => format!(
+                "shield-ui runs `{} stats`. This is optional: without the eBPF guard, \
+                 bans are enforced by the banlist file. If you do run it, note that \
+                 reading the pinned maps needs CAP_BPF.",
+                self.args.fips_guard.display()
+            ),
+        }
+    }
 }
 
 fn handle(st: &State, req: &http::Request) -> http::Response {
@@ -118,7 +146,7 @@ fn api_status(st: &State) -> http::Response {
     let mut o = json::Obj::new();
 
     match st.config() {
-        Some(cfg) => {
+        Ok(cfg) => {
             let svcs = collect::services(&cfg);
             o.raw(
                 "services",
@@ -128,21 +156,22 @@ fn api_status(st: &State) -> http::Response {
             o.str("preset", cfg.get("SHIELD_PRESET").unwrap_or("default"));
             o.bool("config_ok", true);
         }
-        None => {
+        Err(e) => {
             // Rendered as a banner rather than an empty dashboard: an
             // unreadable config looks identical to "nothing configured"
-            // otherwise, and those need different actions.
+            // otherwise, and those need different actions. The command's
+            // own error is carried through, because "could not be run"
+            // alone does not distinguish "not installed" from "installed
+            // but found no shield.env".
             o.raw("services", "[]");
             o.bool("config_ok", false);
-            o.str(
-                "config_error",
-                "shield-config could not be run, or no shield.env was found",
-            );
+            o.str("config_error", &e);
+            o.str("config_hint", &st.hint("config"));
         }
     }
 
     match collect::bans(&st.args.shield_ban) {
-        Some(bans) => {
+        Ok(bans) => {
             let now = collect::now();
             o.num("ban_count", bans.len() as u64);
             o.bool("bans_ok", true);
@@ -154,15 +183,17 @@ fn api_status(st: &State) -> http::Response {
                 &json::arr(recent.iter().take(20).map(|b| collect::ban_json(b, now))),
             );
         }
-        None => {
+        Err(e) => {
             o.bool("bans_ok", false);
             o.num("ban_count", 0);
             o.raw("bans", "[]");
+            o.str("bans_error", &e);
+            o.str("bans_hint", &st.hint("bans"));
         }
     }
 
     match collect::guard_stats(&st.args.fips_guard) {
-        Some(stats) => {
+        Ok(stats) => {
             o.bool("guard_ok", true);
             o.raw(
                 "guard",
@@ -173,10 +204,15 @@ fn api_status(st: &State) -> http::Response {
                 })),
             );
         }
-        None => {
-            // Absent is normal: the eBPF backend is optional.
+        Err(e) => {
+            // Absent is normal: the eBPF backend is optional. But
+            // "installed and failing" is not, and the two read
+            // identically without the message.
             o.bool("guard_ok", false);
             o.raw("guard", "[]");
+            o.bool("guard_installed", st.args.fips_guard.exists());
+            o.str("guard_error", &e);
+            o.str("guard_hint", &st.hint("guard"));
         }
     }
 
@@ -187,7 +223,7 @@ fn api_status(st: &State) -> http::Response {
 fn api_bans(st: &State) -> http::Response {
     let now = collect::now();
     match collect::bans(&st.args.shield_ban) {
-        Some(bans) => {
+        Ok(bans) => {
             let mut o = json::Obj::new();
             o.num("count", bans.len() as u64).raw(
                 "bans",
@@ -195,7 +231,7 @@ fn api_bans(st: &State) -> http::Response {
             );
             http::Response::json(o.done())
         }
-        None => http::Response::error(500, "shield-ban could not be run"),
+        Err(e) => http::Response::error(500, &e),
     }
 }
 

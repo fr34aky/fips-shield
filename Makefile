@@ -104,6 +104,31 @@ install-ui: ## install the dashboard and its systemd unit (needs root)
 	test -x "$$bin" || { echo "no built shield-ui; run 'make ui' first"; exit 1; }; \
 	install -m 755 "$$bin" /usr/local/bin/shield-ui
 	install -m 644 deploy/host/shield-ui.service /etc/systemd/system/
+	@# shield-ui resolves config by RUNNING shield-config, so it needs it
+	@# on the host even in container mode, where everything else lives in
+	@# the images. Installing only the binary left the dashboard reporting
+	@# "could not be run" for every panel.
+	install -d /usr/local/share/fips-shield
+	cp -r presets /usr/local/share/fips-shield/
+	install -m 755 bin/shield-config /usr/local/bin/shield-config
+	@# Point the service at the env file this install used. Without it the
+	@# service starts in / and shield-config finds no shield.env.
+	@env_abs="$$(cd "$$(dirname '$(ENV)')" 2>/dev/null && pwd)/$$(basename '$(ENV)')"; \
+	if [ -f "$$env_abs" ]; then \
+	    install -d /etc/default; \
+	    printf 'SHIELD_UI_ENV_FILE=%s\n' "$$env_abs" > /etc/default/shield-ui; \
+	    echo "config: shield-ui will read $$env_abs"; \
+	else \
+	    echo "note: $(ENV) not found. Set SHIELD_UI_ENV_FILE in"; \
+	    echo "      /etc/default/shield-ui, or the dashboard will find no config."; \
+	fi
+	@# shield-ban is installed by `make install` or `make install-guard`,
+	@# not here — say so rather than let the Bans panel fail unexplained.
+	@test -x /usr/local/bin/shield-ban || { \
+	    echo "note: /usr/local/bin/shield-ban is missing, so the Bans panel"; \
+	    echo "      will report it. Install it with 'sudo make install' or"; \
+	    echo "      'sudo make install-guard'."; \
+	}
 	@echo
 	@echo "now: systemctl daemon-reload && systemctl enable --now shield-ui"
 	@echo "then, from your workstation:"

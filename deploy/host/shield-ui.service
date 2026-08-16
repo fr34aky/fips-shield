@@ -34,7 +34,12 @@ RestartSec=5s
 # make those permissions unreproducible across restarts.
 User=root
 ProtectSystem=strict
-ProtectHome=yes
+# read-only rather than yes: shield.env very often lives in a checkout
+# under a home directory, and ProtectHome=yes makes it unreadable — the
+# dashboard then starts fine and reports "no shield.env was found" for
+# every panel. Writes are still blocked. Tighten this to `yes` if you
+# keep shield.env outside /home (e.g. /etc/fips-shield/shield.env).
+ProtectHome=read-only
 PrivateTmp=yes
 PrivateDevices=yes
 NoNewPrivileges=yes
@@ -51,6 +56,22 @@ ProtectHostname=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @obsolete
+# Empty on purpose. The dashboard needs no capability to read logs or
+# run shield-config.
+#
+# The one consequence: with the eBPF backend, `shield-ban list` and
+# `fips-guard stats` open pinned BPF maps, which needs CAP_BPF — so the
+# Bans and Kernel guard panels will report a permission error. That is
+# the safe default, because CAP_BPF is HOST-WIDE: it permits opening
+# every BPF map on the machine, not just the shield's.
+#
+# To accept that trade and light up those panels:
+#   sudo systemctl edit shield-ui
+#   [Service]
+#   CapabilityBoundingSet=CAP_BPF
+#
+# On the file backend (no eBPF guard) nothing is needed — shield-ban
+# just reads the banlist.
 CapabilityBoundingSet=
 AmbientCapabilities=
 # Loopback only. If you have deliberately bound a routable address

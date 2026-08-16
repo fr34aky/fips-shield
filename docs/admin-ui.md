@@ -13,9 +13,20 @@ in it. That is a deliberate boundary, not a missing feature — see
 ```sh
 rustup target add "$(uname -m)"-unknown-linux-musl   # once, same target as the guard
 make ui                       # as your normal user
-sudo make install-ui
+sudo make install-ui ENV=shield.env
 sudo systemctl daemon-reload && sudo systemctl enable --now shield-ui
 ```
+
+Pass `ENV=` the shield.env you actually use — in container mode that is
+`deploy/container/shield.env`. `install-ui` records it in
+`/etc/default/shield-ui`, because the service starts in `/` and would
+otherwise find no configuration.
+
+`install-ui` also installs `shield-config` and `presets/`, which the
+dashboard runs to resolve configuration. It does **not** install
+`shield-ban`; that comes from `sudo make install` (host mode) or
+`sudo make install-guard` (eBPF backend). Without it the Bans panel
+says so.
 
 Then, from your workstation:
 
@@ -49,6 +60,43 @@ Panels degrade independently. The eBPF guard is optional, so an absent
 `fips-guard` renders "not in use" rather than an error, and the rest of
 the page still works.
 
+## When a panel says a tool did not run
+
+Each panel reports the command it ran, the error, and the path it tried,
+because the causes need different fixes:
+
+| Message | Cause | Fix |
+|---|---|---|
+| `No such file or directory` | the tool is not installed on this host | `sudo make install`, `sudo make install-guard`, or point the matching `--shield-*` flag at it |
+| `no shield.env found` | installed, but started in `/` with nothing to read | set `SHIELD_UI_ENV_FILE` in `/etc/default/shield-ui` |
+| a permission error from `fips-guard` | the unit has no `CAP_BPF`, so the pinned maps cannot be opened | see below |
+
+In container mode the shield's own tools live inside the images, so the
+host needs its own copy of `shield-config` and `presets/` — which is
+what `install-ui` now installs.
+
+### The eBPF panels and CAP_BPF
+
+With the eBPF backend, `shield-ban list` and `fips-guard stats` open
+pinned BPF maps, which needs `CAP_BPF`. The unit ships with an empty
+capability bounding set, so those two panels report a permission error
+by default. That is deliberate: **`CAP_BPF` is host-wide**, permitting
+any BPF map on the machine to be opened, not just the shield's.
+
+To accept that trade:
+
+```sh
+sudo systemctl edit shield-ui
+```
+
+```ini
+[Service]
+CapabilityBoundingSet=CAP_BPF
+```
+
+On the file backend nothing is needed — `shield-ban` just reads the
+banlist.
+
 ## Security
 
 **It has no authentication.** It is bound to loopback and meant to be
@@ -70,6 +118,12 @@ authentication in front of it before you widen the bind.
 
 The systemd unit adds `IPAddressAllow=localhost` / `IPAddressDeny=any`
 on top, so even a misconfigured bind cannot be reached off-box.
+
+`ProtectHome=read-only` rather than `yes`, because `shield.env` commonly
+lives in a checkout under a home directory and `yes` would make it
+unreadable — the dashboard would start cleanly and report "no shield.env
+found" on every panel. Writes are still blocked. If you keep
+`shield.env` outside `/home`, tighten it back to `yes`.
 
 What the process can do is bounded by construction:
 

@@ -151,12 +151,23 @@ function renderServices(list) {
   }
 }
 
+// A failed collector renders its own error and what to do about it.
+// "unavailable" on its own sends the reader hunting; the three causes
+// (not installed / no config found / no permission) need three
+// different fixes.
+function renderFailure(box, error, hint) {
+  box.replaceChildren();
+  const d = el("div", "banner bad");
+  d.appendChild(el("div", "mono", error || "unavailable"));
+  if (hint) d.appendChild(el("div", "sub", hint));
+  box.appendChild(d);
+}
+
 function renderBans(d) {
   const box = $("bans");
   box.replaceChildren();
   if (!d.bans_ok) {
-    box.appendChild(el("div", "empty",
-      "shield-ban could not be run, so the ban list is unavailable."));
+    renderFailure(box, d.bans_error, d.bans_hint);
     return;
   }
   if (!d.bans.length) {
@@ -188,9 +199,15 @@ function renderGuard(d) {
   const box = $("guard");
   box.replaceChildren();
   if (!d.guard_ok) {
-    box.appendChild(el("div", "empty",
-      "Not in use. Bans are enforced by the banlist file; " +
-      "the eBPF guard is optional."));
+    // Not installed is the ordinary case and stays quiet. Installed but
+    // failing is a real problem and must not look the same.
+    if (d.guard_installed) {
+      renderFailure(box, d.guard_error, d.guard_hint);
+    } else {
+      box.appendChild(el("div", "empty",
+        "Not in use. Bans are enforced by the banlist file; " +
+        "the eBPF guard is optional."));
+    }
     return;
   }
   const wrap = el("div", "scroll");
@@ -221,8 +238,7 @@ async function refresh() {
 
   $("banner").replaceChildren();
   if (!d.config_ok) {
-    $("banner").replaceChildren(
-      el("div", "banner bad", d.config_error || "Configuration unreadable."));
+    renderFailure($("banner"), d.config_error, d.config_hint);
   }
   $("bindaddr").textContent = d.bind_addr ? "bound " + d.bind_addr : "";
   $("updated").textContent = "updated " + new Date().toLocaleTimeString();
