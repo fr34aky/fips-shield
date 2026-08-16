@@ -44,6 +44,13 @@ extra configuration.
 
 ## Configure
 
+Only `SHIELD_PROFILES`, `SHIELD_BIND_ADDR` and the upstream are
+required — the rest comes from the preset chosen by `SHIELD_PRESET` (or
+`SHIELD_HTTP_PRESET` for this service alone). The values below are what
+you would write to pin them; run `shield-config show http` to see what
+the preset gives you first, and set only what you actually want to
+differ. See [presets](../../presets/README.md).
+
 ```sh
 SHIELD_PROFILES=http
 SHIELD_BIND_ADDR=fd97:...            # your fips0 address

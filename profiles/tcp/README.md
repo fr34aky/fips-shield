@@ -29,6 +29,13 @@ does for Nostr-over-WebSocket).
 
 ## Configure
 
+Only `SHIELD_PROFILES`, `SHIELD_BIND_ADDR` and the upstream are
+required — the rest comes from the preset chosen by `SHIELD_PRESET` (or
+`SHIELD_TCP_PRESET` for this service alone). The values below are what
+you would write to pin them; run `shield-config show tcp` to see what
+the preset gives you first, and set only what you actually want to
+differ. See [presets](../../presets/README.md).
+
 ```sh
 SHIELD_PROFILES=tcp                    # or strfry,tcp for both
 SHIELD_TCP_SERVICE=ssh                 # names the log file and log field

@@ -66,7 +66,10 @@ sudo systemctl restart ssh
 ss -tulnp | grep :22        # should show 127.0.0.1:22 only
 ```
 
-**2. Configure the shield** in `shield.env`:
+**2. Configure the shield** in `shield.env`. Only the first three lines
+are required; the rest are shown to make the policy explicit, but each
+one you omit comes from the preset instead. `shield-config show tcp`
+prints what you would get either way.
 
 ```sh
 SHIELD_PROFILES=tcp

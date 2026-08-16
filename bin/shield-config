@@ -1,0 +1,300 @@
+#!/bin/sh
+# fips-shield configuration resolver.
+#
+#   shield-config resolve [-f FILE|--from-env]   full KEY=VALUE environment
+#   shield-config show    [SERVICE] [-f FILE]    effective values + where each came from
+#   shield-config diff    [SERVICE] [-f FILE]    only what you have overridden
+#   shield-config levels                         available presets
+#
+# Two layers, and only two:
+#
+#   preset   presets/<scope>/<level>.env — a complete set of values for
+#            core plus each enabled profile.
+#   custom   anything set in shield.env (or, with --from-env, anything
+#            already in the environment).
+#
+# Custom always wins. A preset only fills keys you have not set, so an
+# existing full shield.env keeps behaving exactly as it did — every key
+# simply reports as custom. Trim it to adopt a preset.
+#
+# Levels: SHIELD_PRESET sets the default for everything;
+# SHIELD_<PROFILE>_PRESET overrides it for one service.
+#
+# POSIX sh on purpose: host mode (deploy/host/render.sh) and container
+# mode (deploy/container/shield-entrypoint.sh, busybox ash) both call
+# this, and the two deploy modes must not drift apart.
+set -eu
+
+# A literal tab. Field separator for the internal KEY<TAB>VALUE<TAB>SOURCE
+# stream. Never use `IFS=$TAB read -r a b c` on it: tab counts as IFS
+# whitespace, so `KEY<TAB><TAB>SOURCE` (an empty value, which several
+# preset keys legitimately have) collapses to two fields and the source
+# lands in the value. Every split below is parameter expansion, which
+# keeps empty fields.
+TAB=$(printf '\t')
+
+SELF_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+
+# Where the presets live depends on how this was installed: alongside
+# the script in a checkout, under /usr/local/share in host mode, or
+# baked into an image (both Dockerfiles set SHIELD_PRESET_DIR). Search
+# rather than assume, so `make install` and a git checkout both work.
+if [ -z "${SHIELD_PRESET_DIR:-}" ]; then
+    for _cand in "$SELF_DIR/../presets" \
+                 /usr/local/share/fips-shield/presets \
+                 /etc/fips-shield/presets; do
+        if [ -d "$_cand/core" ]; then
+            SHIELD_PRESET_DIR=$_cand
+            break
+        fi
+    done
+fi
+PRESET_DIR=${SHIELD_PRESET_DIR:-$SELF_DIR/../presets}
+[ -d "$PRESET_DIR/core" ] || {
+    echo "shield-config: no presets found (looked in $SELF_DIR/../presets," \
+         "/usr/local/share/fips-shield/presets, /etc/fips-shield/presets)." \
+         "Set SHIELD_PRESET_DIR." >&2
+    exit 1
+}
+LEVELS="strict default loose"
+
+die() { echo "shield-config: $*" >&2; exit 1; }
+
+usage() {
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+# Read KEY=VALUE literally — no shell evaluation, no quote stripping —
+# exactly as docker --env-file and deploy/host/render.sh do. A value
+# like "GET|HEAD|POST" must not be parsed as a pipeline, and quotes must
+# stay literal, or the two deploy modes would disagree.
+parse_envfile() {
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        key=${line%%=*}
+        case "$key" in
+            [A-Za-z_]*) printf '%s\t%s\n' "$key" "${line#*=}" ;;
+        esac
+    done < "$1"
+}
+
+# The custom layer, as KEY<TAB>VALUE lines. From --from-env this is
+# every preset-known key that is present in the environment; "present"
+# includes set-but-empty, which is what `KEY=` in an env file produces.
+collect_from_env() {
+    all_preset_keys | while IFS= read -r key; do
+        eval "isset=\${$key+yes}"
+        [ "${isset:-}" = yes ] || continue
+        val=""
+        eval "val=\$$key"
+        printf '%s\t%s\n' "$key" "$val"
+    done
+    for key in SHIELD_PROFILES SHIELD_BIND_ADDR SHIELD_PRESET \
+               SHIELD_STRFRY_PRESET SHIELD_HTTP_PRESET SHIELD_TCP_PRESET; do
+        eval "isset=\${$key+yes}"
+        [ "${isset:-}" = yes ] || continue
+        val=""
+        eval "val=\$$key"
+        printf '%s\t%s\n' "$key" "$val"
+    done
+}
+
+all_preset_keys() {
+    for f in "$PRESET_DIR"/*/default.env; do
+        [ -f "$f" ] || continue
+        parse_envfile "$f" | cut -f1
+    done | sort -u
+}
+
+# Value of KEY in the custom layer; exit 1 if absent.
+#
+# The LAST occurrence wins, because that is what docker --env-file does
+# when a key appears twice. Taking the first instead would make a
+# duplicated key mean one thing in container mode and another in host
+# mode — and it is exactly how an operator appends an override to the
+# bottom of shield.env.
+custom_get() {
+    awk -F'\t' -v k="$1" '$1==k { v=substr($0, length(k)+2); f=1 } END { if (f) print v; exit !f }' \
+        "$CUSTOM_FILE"
+}
+
+upper() { echo "$1" | tr '[:lower:]' '[:upper:]'; }
+
+level_for() {  # scope -> level
+    _lv=""
+    if [ "$1" != core ]; then
+        _lv=$(custom_get "SHIELD_$(upper "$1")_PRESET" 2>/dev/null || true)
+    fi
+    [ -n "$_lv" ] || _lv=$(custom_get SHIELD_PRESET 2>/dev/null || true)
+    [ -n "$_lv" ] || _lv=default
+    case " $LEVELS " in
+        *" $_lv "*) ;;
+        *) die "unknown preset level '$_lv' (have:$LEVELS)" ;;
+    esac
+    echo "$_lv"
+}
+
+scopes() {  # core first, then each enabled profile
+    echo core
+    profiles=$(custom_get SHIELD_PROFILES 2>/dev/null || echo strfry)
+    [ -n "$profiles" ] || profiles=strfry
+    echo "$profiles" | tr ',' ' ' | tr -s ' ' '\n' | while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        [ -d "$PRESET_DIR/$p" ] || die "no preset for profile '$p' ($PRESET_DIR/$p)"
+        echo "$p"
+    done
+}
+
+# Emit: KEY<TAB>VALUE<TAB>SOURCE for one scope, preset order preserved.
+resolve_scope() {
+    _scope=$1
+    _level=$(level_for "$_scope")
+    _file="$PRESET_DIR/$_scope/$_level.env"
+    [ -f "$_file" ] || die "missing preset $_file"
+    parse_envfile "$_file" | while IFS= read -r _line; do
+        k=${_line%%"$TAB"*}
+        v=${_line#*"$TAB"}
+        if _cv=$(custom_get "$k" 2>/dev/null); then
+            printf '%s\t%s\tcustom\n' "$k" "$_cv"
+        else
+            printf '%s\t%s\tpreset:%s/%s\n' "$k" "$v" "$_scope" "$_level"
+        fi
+    done
+}
+
+# Custom keys that no preset defines — SHIELD_BIND_ADDR, SHIELD_PROFILES,
+# the SHIELD_*_PRESET selectors, and anything the operator added.
+resolve_extras() {
+    _known=$(all_preset_keys)
+    cut -f1 "$CUSTOM_FILE" | while IFS= read -r k; do
+        case "
+$_known
+" in *"
+$k
+"*) continue ;; esac
+        printf '%s\t%s\tcustom\n' "$k" "$(custom_get "$k")"
+    done
+}
+
+resolve_all() {
+    scopes | while IFS= read -r s; do resolve_scope "$s"; done
+    resolve_extras
+}
+
+# ---------------------------------------------------------------- main
+
+CMD=${1:-}
+[ -n "$CMD" ] || usage 1
+shift || true
+
+case "$CMD" in -h|--help|help) usage 0 ;; esac
+
+if [ "$CMD" = levels ]; then
+    for l in $LEVELS; do
+        printf '%-8s %s\n' "$l" \
+            "$(sed -n '2s/^# //p' "$PRESET_DIR/core/$l.env" 2>/dev/null)"
+    done
+    exit 0
+fi
+
+ENV_FILE=""
+FROM_ENV=no
+SERVICE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f|--file)  ENV_FILE=${2:?-f needs a path}; shift 2 ;;
+        --from-env) FROM_ENV=yes; shift ;;
+        --shell)    SHELL_OUT=yes; shift ;;
+        -h|--help)  usage 0 ;;
+        -*)         die "unknown option: $1" ;;
+        *)          SERVICE=$1; shift ;;
+    esac
+done
+SHELL_OUT=${SHELL_OUT:-no}
+
+CUSTOM_FILE=$(mktemp)
+trap 'rm -f "$CUSTOM_FILE"' EXIT INT TERM
+
+if [ "$FROM_ENV" = yes ]; then
+    collect_from_env > "$CUSTOM_FILE"
+elif [ -n "$ENV_FILE" ]; then
+    [ -f "$ENV_FILE" ] || die "no such env file: $ENV_FILE"
+    parse_envfile "$ENV_FILE" > "$CUSTOM_FILE"
+else
+    for c in shield.env deploy/container/shield.env; do
+        if [ -f "$c" ]; then
+            ENV_FILE=$c
+            break
+        fi
+    done
+    [ -n "$ENV_FILE" ] || die "no shield.env found; pass -f FILE or --from-env"
+    parse_envfile "$ENV_FILE" > "$CUSTOM_FILE"
+fi
+
+# Restrict to one service's keys. core keys are shown too, since they
+# apply to every service and operators ask "why is this node banned"
+# about fail2ban settings that live there.
+filter_service() {
+    if [ -z "$SERVICE" ]; then cat; return; fi
+    _keys=$(parse_envfile "$PRESET_DIR/$SERVICE/default.env" 2>/dev/null | cut -f1)
+    if [ -z "$_keys" ]; then
+        _have=""
+        for _d in "$PRESET_DIR"/*/; do
+            _d=${_d%/}; _d=${_d##*/}
+            [ "$_d" = core ] && continue
+            _have="$_have $_d"
+        done
+        die "unknown service '$SERVICE' (have:$_have)"
+    fi
+    awk -F'\t' -v keys="$_keys" '
+        BEGIN { n=split(keys, a, "\n"); for (i=1;i<=n;i++) want[a[i]]=1 }
+        want[$1]' -
+}
+
+case "$CMD" in
+resolve)
+    resolve_all | filter_service | while IFS= read -r _line; do
+        k=${_line%%"$TAB"*}; _rest=${_line#*"$TAB"}
+        v=${_rest%"$TAB"*}
+        if [ "$SHELL_OUT" = yes ]; then
+            # Single-quote for eval; a literal ' becomes '\''.
+            printf "export %s='%s'\n" "$k" "$(printf '%s' "$v" | sed "s/'/'\\\\''/g")"
+        else
+            printf '%s=%s\n' "$k" "$v"
+        fi
+    done
+    ;;
+show)
+    if [ -n "$SERVICE" ]; then
+        printf 'service %s   preset %s\n\n' "$SERVICE" "$(level_for "$SERVICE")"
+    else
+        printf 'profiles %s   preset %s\n\n' \
+            "$(custom_get SHIELD_PROFILES 2>/dev/null || echo strfry)" \
+            "$(level_for core)"
+    fi
+    printf '  %-34s %-26s %s\n' KEY VALUE SOURCE
+    resolve_all | filter_service | while IFS= read -r _line; do
+        k=${_line%%"$TAB"*}; _rest=${_line#*"$TAB"}
+        v=${_rest%"$TAB"*}; src=${_rest##*"$TAB"}
+        [ -n "$v" ] || v="(empty)"
+        printf '  %-34s %-26s %s\n' "$k" "$v" "$src"
+    done
+    ;;
+diff)
+    n=0
+    resolve_all | filter_service | while IFS= read -r _line; do
+        k=${_line%%"$TAB"*}; _rest=${_line#*"$TAB"}
+        v=${_rest%"$TAB"*}; src=${_rest##*"$TAB"}
+        [ "$src" = custom ] || continue
+        n=$((n + 1))
+        [ "$n" -eq 1 ] && printf '  %-34s %s\n' KEY 'YOUR VALUE'
+        [ -n "$v" ] || v="(empty)"
+        printf '  %-34s %s\n' "$k" "$v"
+    done
+    ;;
+*)
+    die "unknown command '$CMD' (resolve|show|diff|levels)"
+    ;;
+esac

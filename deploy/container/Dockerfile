@@ -17,8 +17,11 @@ COPY core/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY core/njs/ /etc/nginx/njs/
 COPY core/nginx/*.template /etc/nginx/templates/
 COPY profiles/ /etc/nginx/profiles/
+COPY presets/ /etc/nginx/presets/
+COPY bin/shield-config /usr/local/bin/shield-config
 COPY deploy/container/shield-entrypoint.sh /shield-entrypoint.sh
-RUN chmod +x /shield-entrypoint.sh
+RUN chmod +x /shield-entrypoint.sh /usr/local/bin/shield-config
+ENV SHIELD_PRESET_DIR=/etc/nginx/presets
 
 # Sockets joining each profile's stream stage to its http stage. nginx
 # chmods unix listen sockets to 0666, so the directory permissions are

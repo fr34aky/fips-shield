@@ -162,6 +162,7 @@ git clone https://github.com/fr34aky/fips-shield.git
 cd fips-shield/deploy/container
 cp ../../shield.env.example shield.env
 $EDITOR shield.env            # see section 4
+shield-config show            # confirm what that means before starting
 docker compose up -d
 ```
 
@@ -248,14 +249,14 @@ You should see one JSON line per session.
 
 ## 4. Configuration
 
-Everything lives in one file, `shield.env`. Copy
-`shield.env.example` — every option is documented inline — and edit.
-Both deploy modes read the same file.
+Everything lives in one file, `shield.env`, read by both deploy modes.
+It is deliberately short: you set what is specific to your node, and a
+**preset** supplies the rest.
 
 ### The three settings you must set
 
 ```sh
-# 1. Which profile(s) to run (comma-separated for several)
+# 1. Which profile(s) to run. One profile = one service.
 SHIELD_PROFILES=tcp
 
 # 2. Your node's mesh address (ip -6 addr show fips0)
@@ -265,9 +266,82 @@ SHIELD_BIND_ADDR=fd97:1234:5678:9abc:def0:1234:5678:9abc
 SHIELD_TCP_UPSTREAM=127.0.0.1:22
 ```
 
-### Everything else has a working default
+That is a working deployment. Everything else comes from a preset.
 
-Grouped by what they do:
+### Presets: how much enforcement
+
+Three levels ship. They differ only in degree — every protection layer
+runs at every level.
+
+```sh
+shield-config levels
+```
+
+| Level | For |
+|---|---|
+| `strict` | Clients you control, or a node under active abuse. Tight limits, fast banning, long bans. |
+| `default` | Balanced. What the smoke tests exercise and what this guide assumes. |
+| `loose` | A busy public service where a false positive costs more than an abusive peer does. |
+
+`SHIELD_PRESET` sets the level for every service.
+`SHIELD_<PROFILE>_PRESET` overrides it for one — a tight relay next to a
+relaxed internal dashboard is two lines:
+
+```sh
+SHIELD_PRESET=default
+SHIELD_STRFRY_PRESET=strict
+```
+
+### Seeing what is actually in force
+
+This is the question that matters when something gets refused, and it
+has one answer:
+
+```sh
+shield-config show            # every effective value
+shield-config show strfry     # one service
+```
+
+```
+service strfry   preset strict
+
+  KEY                                VALUE            SOURCE
+  SHIELD_MAX_CONNS_PER_NODE          4                preset:strfry/strict
+  SHIELD_STRFRY_CONN_RATE            30               preset:strfry/strict
+  SHIELD_WS_MAX_LIMIT                1000             preset:strfry/strict
+  SHIELD_UPSTREAM                    127.0.0.1:7777   preset:strfry/strict
+```
+
+Every value is labelled `custom` or `preset:<scope>/<level>`, so you can
+always tell what you chose from what you inherited.
+
+```sh
+shield-config diff            # only what this node overrides
+```
+
+### Overriding one value
+
+Set the key in `shield.env`. That is the whole mechanism — the rest of
+the preset still applies:
+
+```sh
+SHIELD_PRESET=strict
+SHIELD_WS_MAX_LIMIT=5000      # but let clients page normally
+```
+
+```
+  SHIELD_WS_MAX_LIMIT                5000             custom
+```
+
+Run `shield-config show` to see every key you could pin. A key set twice
+in `shield.env` takes its **last** occurrence, matching
+`docker --env-file`, so appending an override to the bottom of the file
+works and reads in the order you made the decisions.
+
+### What the keys mean
+
+Grouped by what they do. All of them have preset values; you only touch
+one when you have a reason.
 
 | Group | Variables | Meaning |
 |---|---|---|
@@ -279,7 +353,7 @@ Grouped by what they do:
 | Detection | `SHIELD_F2B_*` | how many violations before a ban, and for how long |
 | strfry only | `SHIELD_WS_*`, `SHIELD_NOSTR_*` | WebSocket/Nostr message policy |
 
-After changing anything:
+### Applying a change
 
 ```sh
 # container mode
@@ -289,12 +363,21 @@ docker compose up -d --force-recreate
 sudo deploy/host/render.sh shield.env && sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### A note on shared limits
+`shield-config show` reads `shield.env` directly, so it reflects your
+edit **before** you apply it. Use it to check a change is what you meant
+before reloading anything.
 
-The per-node concurrency cap is counted in one shared table across all
-enabled profiles. If a peer holds 3 connections to one profile and 2 to
-another, it has 5 in the table. Size the caps with that in mind when
-you run several profiles.
+### Each service's limits are its own
+
+A node's connections to one profile do not count against another
+profile's caps. Running a busy relay next to SSH on the same node cannot
+lock that node out of SSH.
+
+> This was not always true. Before 2026-08 the per-node connection-rate
+> counter and the `limit_conn` zones were shared across profiles, so the
+> tightest limit governed everything. If you levelled your `*_CONN_RATE`
+> values to work around it, you can set them back — or just delete them
+> and take the preset.
 
 ---
 
@@ -467,13 +550,21 @@ awk -F'"' '/"src"/ {print $8}' /var/log/nginx/shield-*.stream.log \
 
 ### Tuning limits
 
-Start with the defaults, then watch `shield-error.log` for a week:
+Start on a preset, then watch `shield-error.log` for a week:
 
-- **Legitimate clients tripping limits?** Your limits are too tight —
-  raise the specific one named in the `rule` field.
-- **Abuse getting through?** Tighten that limit, or lower the matching
-  `SHIELD_F2B_*_MAXRETRY` so offenders get banned sooner.
+- **Legitimate clients tripping limits?** Your limits are too tight. If
+  it is broadly too tight, move that service to a looser preset
+  (`SHIELD_<PROFILE>_PRESET=loose`). If it is one specific limit, pin
+  just that key — the `rule` field in the verdict names it.
+- **Abuse getting through?** The reverse: `strict` for that service, or
+  tighten the one limit, or lower the matching `SHIELD_F2B_*_MAXRETRY`
+  so offenders get banned sooner.
 - **Never any verdicts?** That is fine. It means nobody is misbehaving.
+
+Reach for the preset first and the individual key second. A preset is a
+coherent set of values; a hand-tuned key is one you now maintain.
+`shield-config diff` shows how far you have drifted from the preset,
+which is worth checking occasionally.
 
 Set `SHIELD_F2B_IGNOREIP` to your own monitoring nodes so they are
 never banned.
@@ -616,6 +707,28 @@ is broken, since the cost of that claim is this re-ban loop. A heartbeat
 that exists and has gone **stale** is a real failure and is reported as
 one: it means the watchdog stopped, so nothing is left to notice a
 detached classifier.
+
+**A value I set in `shield.env` is not taking effect.**
+
+```sh
+shield-config show <service> | grep <THE_KEY>
+```
+
+The `SOURCE` column settles it. `custom` means your value is the one in
+force, so the problem is elsewhere — most likely you have not applied
+the change yet (`docker compose up -d --force-recreate`, or re-render
+and reload in host mode). `preset:...` means your line is not being
+read: check the spelling, that it is `KEY=value` with no spaces around
+the `=`, and that it is in the file `shield-config` is reading (pass
+`-f` to be sure). Note that a key set twice takes the **last**
+occurrence.
+
+**A value changed that I never touched.**
+
+You probably changed the preset level. `shield-config diff` lists
+everything you have pinned; anything not in that list moves when
+`SHIELD_PRESET` or `SHIELD_<PROFILE>_PRESET` changes. Pin the ones you
+depend on.
 
 **nginx will not start after a config change.**
 Run `sudo nginx -t` — it names the file and line. In host mode, a

@@ -18,14 +18,22 @@ trap cleanup EXIT
 
 # Test policy: example env with a loopback bind and limits small enough
 # to trip deterministically (ws_test.py encodes these expectations).
-sed -e 's/^SHIELD_BIND_ADDR=.*/SHIELD_BIND_ADDR=::1/' \
-    -e 's/^SHIELD_HANDSHAKE_BURST=.*/SHIELD_HANDSHAKE_BURST=20/' \
-    -e 's/^SHIELD_WS_MAX_MSG=.*/SHIELD_WS_MAX_MSG=1000/' \
-    -e 's/^SHIELD_WS_MAX_SUBS=.*/SHIELD_WS_MAX_SUBS=2/' \
-    -e 's/^SHIELD_WS_EVENT_RATE=.*/SHIELD_WS_EVENT_RATE=1/' \
-    -e 's/^SHIELD_WS_EVENT_BURST=.*/SHIELD_WS_EVENT_BURST=3/' \
-    -e 's/^SHIELD_NOSTR_KIND_DENY=.*/SHIELD_NOSTR_KIND_DENY=4/' \
-    "$REPO_ROOT"/shield.env.example > "$WORK_DIR/shield.env"
+# Test policy is appended rather than sed-substituted into the example:
+# the example no longer carries every key (presets supply the rest), so a
+# sed that matched nothing would silently leave the preset value in place
+# and the test would pass against a policy it never set. Appending is
+# also exactly how an operator pins a value, so this exercises the
+# override path.
+cp "$REPO_ROOT"/shield.env.example "$WORK_DIR/shield.env"
+cat >> "$WORK_DIR/shield.env" <<'EOF'
+SHIELD_BIND_ADDR=::1
+SHIELD_HANDSHAKE_BURST=20
+SHIELD_WS_MAX_MSG=1000
+SHIELD_WS_MAX_SUBS=2
+SHIELD_WS_EVENT_RATE=1
+SHIELD_WS_EVENT_BURST=3
+SHIELD_NOSTR_KIND_DENY=4
+EOF
 
 docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile \
     -t fips-shield:test "$REPO_ROOT"

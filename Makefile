@@ -83,6 +83,14 @@ test-http: ## behavioral: generic HTTP profile
 	test/http_smoke.sh
 test-multiprofile: ## behavioral: per-profile limits stay isolated from each other
 	test/multiprofile_smoke.sh
+
+.PHONY: show diff levels
+show: ## effective config and where each value came from (SERVICE=http to narrow)
+	@bin/shield-config show $(SERVICE) $(if $(ENV),-f $(ENV),)
+diff: ## only the values you have overridden
+	@bin/shield-config diff $(SERVICE) $(if $(ENV),-f $(ENV),)
+levels: ## what strict/default/loose mean
+	@bin/shield-config levels
 test-guard: ## behavioral: eBPF guard (privileged, Linux)
 	test/guard_smoke.sh
 test-guard-sidecar: ## behavioral: containerized fail2ban banning via the guard's maps (Linux)
@@ -97,8 +105,12 @@ test: validate test-filters test-ws test-ban test-tcp test-http test-multiprofil
 install: ## host mode: render configs, install detection + guard (needs root)
 	deploy/host/render.sh $(ENV)
 	deploy/host/install-fail2ban.sh $(ENV)
+	install -d /usr/local/share/fips-shield
+	cp -r presets /usr/local/share/fips-shield/
+	install -m 755 bin/shield-config /usr/local/bin/shield-config
 	@echo
 	@echo "nginx: run 'nginx -t && systemctl reload nginx'"
+	@echo "config: run 'shield-config show' to see what is in force"
 	@echo "guard: see guard/README.md to install the eBPF backend"
 
 # install-guard deliberately does NOT depend on `guard`: it needs root,

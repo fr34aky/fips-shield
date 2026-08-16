@@ -84,8 +84,13 @@ other's budget.
 
 Then:
 
-1. Add the `SHIELD_MYSERVICE_*` defaults to `shield.env.example`, each
-   with a comment saying what it does.
+1. Ship presets: `presets/myservice/{strict,default,loose}.env`, each
+   defining **every** `SHIELD_MYSERVICE_*` key the templates reference.
+   This is not optional — `shield.env` no longer carries per-profile
+   defaults, so a profile without presets fails to resolve. Add to
+   `shield.env.example` only the one or two keys an operator must
+   choose (typically the upstream), commented out.
+   See [presets/README.md](../presets/README.md).
 2. Write `profiles/myservice/README.md`: what it enforces, how the
    protected service must be configured (loopback bind!), and the mesh
    firewall drop-in.
@@ -95,6 +100,9 @@ Then:
 `test/validate.sh` picks the profile up automatically — it renders
 every profile alone and all of them together, so a profile that
 depends on another being enabled, or that collides with one, fails CI.
+It also renders every preset level, and rejects a preset key that no
+template uses, so a stale or misspelled key fails there rather than
+silently doing nothing on an operator's node.
 
 ## Protocol-aware filtering
 

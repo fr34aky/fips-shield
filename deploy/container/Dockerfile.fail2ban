@@ -45,9 +45,12 @@ COPY core/actions/shield-ban /usr/local/bin/shield-ban
 # bind-mounted over /usr/local/bin/shield-ban, this is where that wrapper
 # looks when SHIELD_BAN_ALSO_FILE=true.
 COPY core/actions/shield-ban /usr/local/lib/fips-shield/shield-ban-file
+COPY presets/ /etc/fips-shield/presets/
+COPY bin/shield-config /usr/local/bin/shield-config
 COPY deploy/container/f2b-entrypoint.sh /f2b-entrypoint.sh
-RUN chmod +x /usr/local/bin/shield-ban \
+RUN chmod +x /usr/local/bin/shield-ban /usr/local/bin/shield-config \
     /usr/local/lib/fips-shield/shield-ban-file /f2b-entrypoint.sh
+ENV SHIELD_PRESET_DIR=/etc/fips-shield/presets
 
 ENTRYPOINT ["/f2b-entrypoint.sh"]
 CMD ["fail2ban-server", "-xf", "start"]

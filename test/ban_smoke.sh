@@ -34,14 +34,22 @@ chmod 777 "$WORK_DIR/logs" "$WORK_DIR/bans"
 
 # Test policy: loopback bind, kind 4 denied, 1s ban recheck, and a
 # 2-violation trigger so the automatic loop fires fast.
-sed -e 's/^SHIELD_BIND_ADDR=.*/SHIELD_BIND_ADDR=::1/' \
-    -e 's/^SHIELD_NOSTR_KIND_DENY=.*/SHIELD_NOSTR_KIND_DENY=4/' \
-    -e 's/^SHIELD_BAN_RECHECK=.*/SHIELD_BAN_RECHECK=1/' \
-    -e 's/^SHIELD_F2B_VERDICT_MAXRETRY=.*/SHIELD_F2B_VERDICT_MAXRETRY=2/' \
-    -e 's/^SHIELD_F2B_FINDTIME=.*/SHIELD_F2B_FINDTIME=120/' \
-    -e 's/^SHIELD_F2B_BANTIME=.*/SHIELD_F2B_BANTIME=120/' \
-    -e 's/^SHIELD_F2B_IGNORESELF=.*/SHIELD_F2B_IGNORESELF=false/' \
-    "$REPO_ROOT"/shield.env.example > "$WORK_DIR/shield.env"
+# Test policy is appended rather than sed-substituted into the example:
+# the example no longer carries every key (presets supply the rest), so a
+# sed that matched nothing would silently leave the preset value in place
+# and the test would pass against a policy it never set. Appending is
+# also exactly how an operator pins a value, so this exercises the
+# override path.
+cp "$REPO_ROOT"/shield.env.example "$WORK_DIR/shield.env"
+cat >> "$WORK_DIR/shield.env" <<'EOF'
+SHIELD_BIND_ADDR=::1
+SHIELD_NOSTR_KIND_DENY=4
+SHIELD_BAN_RECHECK=1
+SHIELD_F2B_VERDICT_MAXRETRY=2
+SHIELD_F2B_FINDTIME=120
+SHIELD_F2B_BANTIME=120
+SHIELD_F2B_IGNORESELF=false
+EOF
 
 docker build -q -f "$REPO_ROOT"/deploy/container/Dockerfile \
     -t fips-shield:test "$REPO_ROOT"
