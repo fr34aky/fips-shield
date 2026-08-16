@@ -9,7 +9,17 @@ set -eu
 # --env-file has already put shield.env into the environment, so
 # "already set" means "the operator chose it" and the preset leaves it
 # alone. Same script host mode runs, so the two cannot drift.
-eval "$(/usr/local/bin/shield-config resolve --from-env --shell)"
+# Captured before eval, not `eval "$(...)"`: command substitution does
+# not propagate its exit status to eval, so `set -e` never fires and a
+# failed resolve would continue with NO preset values. envsubst would
+# then render every unset key empty and nginx would fail to start on an empty listen port — or, worse, start
+# with limits silently set to nothing.
+if ! _resolved=$(/usr/local/bin/shield-config resolve --from-env --shell); then
+    echo "error: shield-config could not resolve the configuration." >&2
+    echo "  Refusing to start with a partial config." >&2
+    exit 1
+fi
+eval "$_resolved"
 
 for profile in $(echo "${SHIELD_PROFILES:-strfry}" | tr ',' ' '); do
     dir="/etc/nginx/profiles/$profile"

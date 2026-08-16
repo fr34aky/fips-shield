@@ -247,6 +247,33 @@ else
     parse_envfile "$ENV_FILE" > "$CUSTOM_FILE"
 fi
 
+# Fail before emitting anything, in THIS shell.
+#
+# die() is exit, and almost every consumer of scopes()/level_for() runs
+# them inside `$(...)` or a `... | while` pipeline — both subshells. An
+# invalid preset level therefore printed its error to stderr, exited the
+# subshell, and left the script producing EMPTY output with status 0.
+# The container entrypoints then rendered every placeholder blank and
+# nginx started, or failed complaining about a zone size rather than the
+# real cause.
+#
+# level_for is called here without a command substitution so its die()
+# reaches the top level.
+validate() {
+    _profiles=$(custom_get SHIELD_PROFILES 2>/dev/null || echo strfry)
+    [ -n "$_profiles" ] || _profiles=strfry
+    for _s in core $(echo "$_profiles" | tr ',' ' '); do
+        [ -n "$_s" ] || continue
+        [ -d "$PRESET_DIR/$_s" ] ||
+            die "no preset directory for '$_s' ($PRESET_DIR/$_s)"
+        level_for "$_s" >/dev/null
+        _lv=$(level_for "$_s")
+        [ -f "$PRESET_DIR/$_s/$_lv.env" ] ||
+            die "missing preset $PRESET_DIR/$_s/$_lv.env"
+    done
+}
+validate
+
 # Restrict to one service's keys. core keys are shown too, since they
 # apply to every service and operators ask "why is this node banned"
 # about fail2ban settings that live there.

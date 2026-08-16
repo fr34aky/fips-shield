@@ -33,7 +33,18 @@ NJS_DIR="${3:-/etc/nginx/njs}"
 #
 # Anything set in the env file wins; the preset only fills the rest, so
 # a full shield.env written before presets existed behaves identically.
-eval "$("$REPO_ROOT/bin/shield-config" resolve -f "$ENV_FILE" --shell)"
+# Captured before eval, not `eval "$(...)"`: command substitution does
+# not propagate its exit status to eval, so `set -e` never fires and a
+# failed resolve would continue with NO preset values. envsubst would
+# then render every unset key empty and the placeholder check below would report every key as unset, which
+# at least fails loudly — but it would blame shield.env rather than
+# the resolver.
+if ! _resolved=$("$REPO_ROOT/bin/shield-config" resolve -f "$ENV_FILE" --shell); then
+    echo "error: shield-config could not resolve the configuration." >&2
+    echo "  Refusing to start with a partial config." >&2
+    exit 1
+fi
+eval "$_resolved"
 
 TEMPLATES=("$REPO_ROOT"/core/nginx/*.template)
 for profile in $(echo "${SHIELD_PROFILES:-strfry}" | tr ',' ' '); do

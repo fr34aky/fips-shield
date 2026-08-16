@@ -8,7 +8,16 @@ set -eu
 # Resolve presets first: the jail template below needs every
 # SHIELD_F2B_* key, and an unset one renders an empty maxretry that
 # fail2ban silently replaces with its own default.
-eval "$(/usr/local/bin/shield-config resolve --from-env --shell)"
+# Captured before eval, not `eval "$(...)"`: command substitution does
+# not propagate its exit status to eval, so `set -e` never fires and a
+# failed resolve would continue with NO preset values. envsubst would
+# then render every unset key empty and fail2ban would fall back to its own defaults for every maxretry.
+if ! _resolved=$(/usr/local/bin/shield-config resolve --from-env --shell); then
+    echo "error: shield-config could not resolve the configuration." >&2
+    echo "  Refusing to start with a partial config." >&2
+    exit 1
+fi
+eval "$_resolved"
 
 SHIELD_ACTION_ENV="$(/usr/local/bin/shield-config action-env --from-env)"
 export SHIELD_ACTION_ENV

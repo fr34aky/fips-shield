@@ -157,6 +157,45 @@ if echo "$rendered" | grep -E '^action(check|ban|unban) = ' |
 fi
 echo "--- banaction carries a custom guard pin dir, and omits an unset one"
 
+# A configuration that cannot resolve must stop the container, not start
+# it with blanks. shield-config's die() is exit, and nearly every caller
+# runs it inside $(...) or a pipeline — both subshells — so an invalid
+# preset level once printed its error, exited the subshell, and returned
+# EMPTY output with status 0. The entrypoint compounded it: `eval "$(...)"`
+# does not propagate the substitution's status, so `set -e` never fired
+# and nginx started against unrendered placeholders.
+cp "$WORK_DIR/shield.env" "$WORK_DIR/env.bad"
+echo 'SHIELD_PRESET=nonsense' >> "$WORK_DIR/env.bad"
+if "$REPO_ROOT"/bin/shield-config resolve -f "$WORK_DIR/env.bad" >/dev/null 2>&1; then
+    echo "error: an unknown preset level resolved successfully" >&2
+    exit 1
+fi
+if docker run --rm --env-file "$WORK_DIR/env.bad" fips-shield:test nginx -t \
+        >/dev/null 2>&1; then
+    echo "error: the shield started with a config that cannot resolve" >&2
+    exit 1
+fi
+# Captured, not piped: the container exits non-zero here by design, and
+# under `set -o pipefail` that fails the pipeline even when grep matches.
+bad_out=$(docker run --rm --env-file "$WORK_DIR/env.bad" fips-shield:test \
+    nginx -t 2>&1 || true)
+case "$bad_out" in
+    *'could not resolve'*) ;;
+    *)
+        echo "error: the failure should name the resolver, not a downstream symptom" >&2
+        printf '%s\n' "$bad_out" >&2
+        exit 1
+        ;;
+esac
+
+cp "$WORK_DIR/shield.env" "$WORK_DIR/env.badprof"
+echo 'SHIELD_PROFILES=strfry,nope' >> "$WORK_DIR/env.badprof"
+if "$REPO_ROOT"/bin/shield-config resolve -f "$WORK_DIR/env.badprof" >/dev/null 2>&1; then
+    echo "error: an unknown profile resolved successfully" >&2
+    exit 1
+fi
+echo "--- an unresolvable config fails loudly instead of rendering blanks"
+
 # Detection sidecar: render the jails and let fail2ban verify the full
 # configuration (filters, action, jail wiring).
 docker run --rm --env-file "$WORK_DIR/shield.env" fips-shield-f2b:test \
