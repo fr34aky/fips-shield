@@ -224,7 +224,10 @@ elif [ -n "$ENV_FILE" ]; then
     parse_envfile "$ENV_FILE" > "$CUSTOM_FILE"
 else
     for c in shield.env deploy/container/shield.env; do
-        [ -f "$c" ] && { ENV_FILE=$c; break; } || true
+        if [ -f "$c" ]; then
+            ENV_FILE=$c
+            break
+        fi
     done
     [ -n "$ENV_FILE" ] || die "no shield.env found; pass -f FILE or --from-env"
     parse_envfile "$ENV_FILE" > "$CUSTOM_FILE"
