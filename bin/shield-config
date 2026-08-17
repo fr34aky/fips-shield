@@ -1,12 +1,25 @@
 #!/bin/sh
 # fips-shield configuration resolver.
 #
-#   shield-config resolve [-f FILE|--from-env]   full KEY=VALUE environment
-#   shield-config show    [SERVICE] [-f FILE]    effective values + where each came from
-#                         --porcelain            same, as SOURCE<TAB>KEY<TAB>VALUE
-#   shield-config diff    [SERVICE] [-f FILE]    only what you have overridden
-#   shield-config levels                         available presets
-#   shield-config action-env [-f FILE|--from-env] assignments the fail2ban action needs
+#   shield-config resolve    [SRC]            full KEY=VALUE environment
+#   shield-config show       [SERVICE] [SRC]  effective values + where each came from
+#                            --porcelain      same, as SOURCE<TAB>KEY<TAB>VALUE
+#   shield-config diff       [SERVICE] [SRC]  only what you have overridden
+#   shield-config levels                      available presets
+#   shield-config action-env [SRC]            assignments the fail2ban action needs
+#
+# SRC is where the custom layer comes from, and applies to every verb
+# above:
+#
+#   -f FILE      read that env file
+#   --from-env   read the current environment
+#   (neither)    search the usual shield.env locations
+#
+# Use --from-env inside a container. The compose files pass the config
+# as `env_file:`, so it reaches the container as environment variables
+# and there is no shield.env on that filesystem to point -f at:
+#
+#   docker compose exec shield shield-config show --from-env
 #
 # Two layers, and only two:
 #

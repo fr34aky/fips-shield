@@ -302,6 +302,22 @@ shield-config show            # every effective value
 shield-config show strfry     # one service
 ```
 
+> **In container mode, add `--from-env`.** The compose files pass the
+> configuration as `env_file:`, so inside the container it exists as
+> environment variables and there is no `shield.env` on that filesystem
+> to find. Without the flag you get `no shield.env found`, which reads
+> like a broken install and is not one:
+>
+> ```sh
+> docker compose exec shield shield-config show --from-env
+> ```
+>
+> This is also the way to check that a `docker compose up` actually
+> took. The presets are baked into the image
+> (`deploy/container/Dockerfile`), so `--force-recreate` alone reruns
+> the entrypoint against the *old* values — pulling new presets needs
+> `--build`.
+
 ```
 service strfry   preset strict
 

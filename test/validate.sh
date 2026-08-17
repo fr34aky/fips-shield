@@ -127,6 +127,37 @@ for level in $LEVELS; do
 done
 echo "--- resolver keeps empty values empty and emits each key once"
 
+# --from-env must work for every verb that reports config, not just the
+# ones the entrypoints call. Container mode passes shield.env as
+# `env_file:`, so inside the container the config exists only as
+# environment variables and there is no file for -f to point at: an
+# operator running `shield-config show` there gets "no shield.env
+# found", which reads like a broken install. `show` and `diff` have
+# always accepted the flag — it was simply absent from the usage text,
+# so nobody knew to reach for it.
+for verb in resolve show diff action-env; do
+    env -i PATH="$PATH" SHIELD_PRESET_DIR="$REPO_ROOT/presets" \
+        SHIELD_PROFILES="$ALL" SHIELD_BIND_ADDR=::1 SHIELD_PRESET=default \
+        "$REPO_ROOT"/bin/shield-config "$verb" --from-env >/dev/null || {
+        echo "error: shield-config $verb --from-env failed" >&2
+        exit 1
+    }
+done
+# ...and the environment really is the source, not a shield.env found
+# on disk: a value set only in the environment must come back.
+from_env=$(env -i PATH="$PATH" SHIELD_PRESET_DIR="$REPO_ROOT/presets" \
+    SHIELD_PROFILES=strfry SHIELD_BIND_ADDR=::1 SHIELD_PRESET=default \
+    SHIELD_WS_MAX_LIMIT=4242 \
+    "$REPO_ROOT"/bin/shield-config resolve --from-env)
+case "$from_env" in
+    *SHIELD_WS_MAX_LIMIT=4242*) ;;
+    *)
+        echo "error: --from-env ignored a key set in the environment" >&2
+        exit 1
+        ;;
+esac
+echo "--- every reporting verb accepts --from-env (the container path)"
+
 # The banaction must carry SHIELD_GUARD_PIN_DIR when it is set, and must
 # omit it entirely when it is not. Both halves matter: without the first
 # a custom pin directory made every ban target maps that do not exist
