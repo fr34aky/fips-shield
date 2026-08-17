@@ -588,8 +588,22 @@ touching any threshold — it names the single key to raise:
 grep shield-verdict /var/log/nginx/shield-error.log | tail -20
 ```
 
-`too-many-subs` → raise `SHIELD_WS_MAX_SUBS`. `filter-complexity` with
-`detail":"items=NNN"` → raise `SHIELD_WS_MAX_FILTER_ITEMS` past NNN.
+`filter-complexity` carries the offending value in `detail`, and each
+value maps to a different key — read it before changing anything:
+
+| `detail` | Key to raise |
+|---|---|
+| `limit=NNN` | `SHIELD_WS_MAX_LIMIT` past NNN |
+| `items=NNN` | `SHIELD_WS_MAX_FILTER_ITEMS` past NNN |
+| `filters=NNN` | `SHIELD_WS_MAX_FILTERS` past NNN |
+| `value-len=NNN` | `SHIELD_WS_MAX_FILTER_VALUE` past NNN |
+| `unbounded-filter` | see below |
+
+`limit=` is the one that bites first in practice: clients pick a page
+size as a constant, so if it exceeds the cap it exceeds it on every
+single REQ, forever, and no amount of reconnecting changes it.
+
+`too-many-subs` → raise `SHIELD_WS_MAX_SUBS`.
 `req-rate` → raise `SHIELD_WS_REQ_BURST`. `unbounded-filter` means the
 client asked for the whole database with no selector at all; that one
 is worth keeping, unless you are running an open public relay, in which
