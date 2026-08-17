@@ -23,11 +23,38 @@ bantime.maxtime = 1w
 ignoreip = ${SHIELD_F2B_IGNOREIP}
 ignoreself = ${SHIELD_F2B_IGNORESELF}
 
+# Message-level POLICY: the client asks for more than this relay
+# budgets (too many subscriptions, a filter longer than the cap, a
+# burst of REQs on connect). A mainstream Nostr client reaches these
+# without malice, and the violation already closed its connection — so
+# this jail is the forgiving one, and its escalation stops at a day
+# rather than a week. A ban here costs the node every shielded service
+# on the interface, not just this one.
 [fips-shield-verdict]
 enabled = true
 filter = fips-shield-verdict
 logpath = /var/log/nginx/shield-error.log
 maxretry = ${SHIELD_F2B_VERDICT_MAXRETRY}
+banaction = fips-shield
+backend = polling
+usedns = no
+findtime = ${SHIELD_F2B_FINDTIME}
+bantime = ${SHIELD_F2B_BANTIME}
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 1d
+ignoreip = ${SHIELD_F2B_IGNOREIP}
+ignoreself = ${SHIELD_F2B_IGNORESELF}
+
+# Structural abuse: not speaking WebSocket, not sending JSON, hiding a
+# message in a fragmentation flood. Nothing a working client reaches,
+# so this keeps the low threshold the verdict jail used to carry for
+# everything, and the full week of escalation.
+[fips-shield-abuse]
+enabled = true
+filter = fips-shield-abuse
+logpath = /var/log/nginx/shield-error.log
+maxretry = ${SHIELD_F2B_ABUSE_MAXRETRY}
 banaction = fips-shield
 backend = polling
 usedns = no

@@ -428,7 +428,8 @@ A rejected message is **never forwarded** — your service never sees it.
 | Feature | Detail | Setting |
 |---|---|---|
 | Handshake-flood jail | repeated rate-limit rejections | `SHIELD_F2B_HANDSHAKE_MAXRETRY` |
-| Verdict jail | repeated protocol/limit violations | `SHIELD_F2B_VERDICT_MAXRETRY` |
+| Verdict jail | repeated limit violations (asking for more than the relay budgets) | `SHIELD_F2B_VERDICT_MAXRETRY` |
+| Abuse jail | malformed frames, protocol violations, fragmentation floods | `SHIELD_F2B_ABUSE_MAXRETRY` |
 | Scan jail | repeated probing of unknown paths | `SHIELD_F2B_SCAN_MAXRETRY` |
 | Escalating bans | each re-offense doubles the ban, up to a week | `SHIELD_F2B_BANTIME` |
 | Allowlist | never ban these sources | `SHIELD_F2B_IGNOREIP` |
@@ -475,8 +476,18 @@ shield-ban check fd97:...:1234       # exit 0 if banned
 shield-ban list                      # active bans and their expiry
 ```
 
-Jail names are `fips-shield-handshake`, `fips-shield-verdict` and
+Jail names are `fips-shield-handshake`, `fips-shield-verdict`,
+`fips-shield-abuse`, `fips-shield-connrate`, `fips-shield-conn` and
 `fips-shield-scan`.
+
+**A ban is not scoped to the service that triggered it.** Every jail
+calls the same banaction, which writes one banlist keyed by source
+address — and the eBPF guard, if installed, drops that address at the
+`fips0` ingress for every listener on the interface. So a Nostr client
+that trips the verdict jail locks its node out of every other shielded
+service too, ssh included. That is why the message-policy thresholds
+are forgiving by default: see the note under
+[Why a client gets banned](#why-a-client-gets-banned).
 
 > ⚠️ **Do not unban with `shield-ban unban` while fail2ban is
 > running.** It removes the entry nginx reads but leaves fail2ban's
@@ -547,6 +558,45 @@ grep shield-verdict /var/log/nginx/shield-error.log | tail -20
 awk -F'"' '/"src"/ {print $8}' /var/log/nginx/shield-*.stream.log \
     | sort | uniq -c | sort -rn | head
 ```
+
+### Why a client gets banned
+
+Two different things can ban a node, and they carry deliberately
+different thresholds:
+
+| | Rules | Meaning | Threshold |
+|---|---|---|---|
+| **Policy** (`fips-shield-verdict`) | `filter-complexity`, `too-many-subs`, `msg-rate`, `event-rate`, `req-rate`, `type-not-allowed`, `kind-denied` | The client asks for more than this relay budgets | `SHIELD_F2B_VERDICT_MAXRETRY`, forgiving |
+| **Abuse** (`fips-shield-abuse`) | `protocol`, `malformed`, `oversized-message`, `oversized-handshake`, `binary-frame`, `frame-flood`, `engine-error` | The client is not speaking the protocol | `SHIELD_F2B_ABUSE_MAXRETRY`, low |
+
+The asymmetry matters because **every violation already closes the
+connection** with a 1008 and a `NOTICE`. A client that trips a policy
+rule does not learn anything from it — it reconnects and does the
+identical thing again, so a low policy threshold turns one unlucky
+setting into a ban within seconds. And a mainstream Nostr client trips
+policy rules without any malice at all:
+
+- it opens its whole subscription set in one burst on connect, against
+  `SHIELD_WS_REQ_BURST` and `SHIELD_WS_MAX_SUBS`;
+- a follow-list query carries one `authors` array as long as the user's
+  follow list, against `SHIELD_WS_MAX_FILTER_ITEMS`.
+
+If a client is bouncing off the relay, read the `rule` field before
+touching any threshold — it names the single key to raise:
+
+```sh
+grep shield-verdict /var/log/nginx/shield-error.log | tail -20
+```
+
+`too-many-subs` → raise `SHIELD_WS_MAX_SUBS`. `filter-complexity` with
+`detail":"items=NNN"` → raise `SHIELD_WS_MAX_FILTER_ITEMS` past NNN.
+`req-rate` → raise `SHIELD_WS_REQ_BURST`. `unbounded-filter` means the
+client asked for the whole database with no selector at all; that one
+is worth keeping, unless you are running an open public relay, in which
+case set `SHIELD_WS_REQUIRE_NARROWING=false`.
+
+Abuse rules are the opposite: if you see those from a client you trust,
+suspect the client, not the threshold.
 
 ### Tuning limits
 
